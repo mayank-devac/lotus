@@ -703,7 +703,7 @@ export class LotusUI {
 
       const maxProximityDist = Math.max(
         0.5,
-        this.settings.proximityDistanceMeters || 2.0,
+        this.settings.proximityDistanceMeters || 0.5,
       );
       const isWithinRadius =
         proj.isWithinRadius ?? proj.distanceMeters <= maxProximityDist;
