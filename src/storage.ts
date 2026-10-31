@@ -10,7 +10,6 @@ import {
 const PINS_STORAGE_KEY = 'lotus_ar_spatial_pins_v3';
 const FOCUS_STORAGE_KEY = 'lotus_ar_focus_zone_v3';
 const SETTINGS_STORAGE_KEY = 'lotus_ar_settings_v3';
-const DAY_MS = 24 * 3600 * 1000;
 const TASKS_STORAGE_KEY = 'lotus_ar_tasks_v3';
 
 export function vec3(x: number, y: number, z: number): Vector3Data {
@@ -29,123 +28,6 @@ export const DEFAULT_TASKS: LotusTask[] = [
     timerRunning: false,
     completed: false,
     createdAt: Date.now() - 3600 * 1000 * 2,
-  },
-  {
-    id: 'task-2',
-    title: 'Organize desk reference articles',
-    note: 'Sorted key papers for literature review',
-    dueLabel: 'Completed Today',
-    type: 'task',
-    timerSeconds: 15 * 60,
-    remainingSeconds: 0,
-    timerRunning: false,
-    completed: true,
-    createdAt: Date.now() - 3600 * 1000 * 6,
-    completedAt: Date.now() - 3600 * 1000 * 2,
-  },
-  {
-    id: 'task-3',
-    title: 'Review spatial optics lecture slides',
-    note: 'Summarized depth-of-field equations',
-    dueLabel: 'Yesterday',
-    type: 'task',
-    timerSeconds: 25 * 60,
-    remainingSeconds: 0,
-    timerRunning: false,
-    completed: true,
-    createdAt: Date.now() - DAY_MS * 1 - 3600 * 1000 * 4,
-    completedAt: Date.now() - DAY_MS * 1 - 3600 * 1000 * 1,
-  },
-  {
-    id: 'task-4',
-    title: 'Submit lab safety checklist',
-    note: 'Confirmed XR headset calibration logs',
-    dueLabel: 'Yesterday',
-    type: 'reminder',
-    timerSeconds: 15 * 60,
-    remainingSeconds: 0,
-    timerRunning: false,
-    completed: true,
-    createdAt: Date.now() - DAY_MS * 1 - 3600 * 1000 * 7,
-    completedAt: Date.now() - DAY_MS * 1 - 3600 * 1000 * 3,
-  },
-  {
-    id: 'task-5',
-    title: 'Draft methodology section outline',
-    note: '2 pages drafted for weekly advisor check-in',
-    dueLabel: '2 days ago',
-    type: 'task',
-    timerSeconds: 45 * 60,
-    remainingSeconds: 0,
-    timerRunning: false,
-    completed: true,
-    createdAt: Date.now() - DAY_MS * 2 - 3600 * 1000 * 5,
-    completedAt: Date.now() - DAY_MS * 2 - 3600 * 1000 * 2,
-  },
-  {
-    id: 'task-6',
-    title: 'Annotate bibliography sources #1–8',
-    note: 'Added spatial memory citations',
-    dueLabel: '3 days ago',
-    type: 'task',
-    timerSeconds: 25 * 60,
-    remainingSeconds: 0,
-    timerRunning: false,
-    completed: true,
-    createdAt: Date.now() - DAY_MS * 3 - 3600 * 1000 * 6,
-    completedAt: Date.now() - DAY_MS * 3 - 3600 * 1000 * 2,
-  },
-  {
-    id: 'task-7',
-    title: 'Return reference textbook to library',
-    note: 'Renewed digital copy',
-    dueLabel: '3 days ago',
-    type: 'reminder',
-    timerSeconds: 15 * 60,
-    remainingSeconds: 0,
-    timerRunning: false,
-    completed: true,
-    createdAt: Date.now() - DAY_MS * 3 - 3600 * 1000 * 8,
-    completedAt: Date.now() - DAY_MS * 3 - 3600 * 1000 * 4,
-  },
-  {
-    id: 'task-8',
-    title: 'Prepare seminar problem set #3',
-    note: 'Completed all 6 proofs',
-    dueLabel: '3 days ago',
-    type: 'task',
-    timerSeconds: 45 * 60,
-    remainingSeconds: 0,
-    timerRunning: false,
-    completed: true,
-    createdAt: Date.now() - DAY_MS * 3 - 3600 * 1000 * 9,
-    completedAt: Date.now() - DAY_MS * 3 - 3600 * 1000 * 5,
-  },
-  {
-    id: 'task-9',
-    title: 'Clean up study desk & calibrate lighting',
-    note: 'Set up warm paper focus environment',
-    dueLabel: '5 days ago',
-    type: 'task',
-    timerSeconds: 15 * 60,
-    remainingSeconds: 0,
-    timerRunning: false,
-    completed: true,
-    createdAt: Date.now() - DAY_MS * 5 - 3600 * 1000 * 4,
-    completedAt: Date.now() - DAY_MS * 5 - 3600 * 1000 * 2,
-  },
-  {
-    id: 'task-10',
-    title: 'Weekly reading group sync notes',
-    note: 'Shared summary with study group',
-    dueLabel: '6 days ago',
-    type: 'reminder',
-    timerSeconds: 25 * 60,
-    remainingSeconds: 0,
-    timerRunning: false,
-    completed: true,
-    createdAt: Date.now() - DAY_MS * 6 - 3600 * 1000 * 5,
-    completedAt: Date.now() - DAY_MS * 6 - 3600 * 1000 * 2,
   },
 ];
 
@@ -229,10 +111,21 @@ export function savePinsToStorage(pins: SpatialPin[]): void {
 export function loadSavedTasks(): LotusTask[] {
   try {
     const raw = localStorage.getItem(TASKS_STORAGE_KEY);
-    if (!raw) return [...DEFAULT_TASKS];
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      return parsed;
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        // Migration: seeded demo tasks (task-2…task-10, all fake completes) are
+        // no longer shown. Strip them from previously saved data. User-created
+        // ids always carry a timestamp suffix, so seed ids are unambiguous.
+        const isSeedId = (id: string): boolean => /^task-(?:[2-9]|10)$/.test(id);
+        return parsed.filter(
+          (t) =>
+            t &&
+            typeof t === 'object' &&
+            typeof (t as LotusTask).id === 'string' &&
+            !isSeedId((t as LotusTask).id),
+        );
+      }
     }
   } catch {
     // Fallback to defaults

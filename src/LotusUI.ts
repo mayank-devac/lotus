@@ -1053,11 +1053,45 @@ export class LotusUI {
   // ===========================================================================
 
   private renderAllPanels() {
-    this.renderTopBar();
-    this.renderCornerStopFocusButton();
-    this.renderModeToast();
-    this.renderModals();
-    this.renderBottomDock();
+    // Re-renders rebuild DOM via innerHTML, which would scroll panels back to
+    // the top. Capture scroll position before, restore after.
+    const prevModalScroll = this.captureModalBodyScroll();
+    const prevListScrolls = this.captureHoverListScrolls();
+    try {
+      this.renderTopBar();
+      this.renderCornerStopFocusButton();
+      this.renderModeToast();
+      this.renderModals();
+      this.renderBottomDock();
+    } finally {
+      this.restoreModalBodyScroll(prevModalScroll);
+      this.restoreHoverListScrolls(prevListScrolls);
+    }
+  }
+
+  private captureModalBodyScroll(): { id: string; top: number } | null {
+    const body = this.modalLayerEl.querySelector<HTMLElement>('.lotus-modal-body[data-modal-id]');
+    if (!body?.dataset.modalId) return null;
+    return { id: body.dataset.modalId, top: body.scrollTop };
+  }
+
+  private restoreModalBodyScroll(prev: { id: string; top: number } | null): void {
+    if (!prev) return;
+    const body = this.modalLayerEl.querySelector<HTMLElement>('.lotus-modal-body[data-modal-id]');
+    if (body?.dataset.modalId === prev.id) body.scrollTop = prev.top;
+  }
+
+  private captureHoverListScrolls(): Array<{ el: HTMLElement; top: number }> {
+    const roots: Array<HTMLElement> = [this.topBarEl, this.focusCornerBarEl];
+    return roots
+      .flatMap((root) => Array.from(root.querySelectorAll<HTMLElement>('.lotus-tasks-hover-list')))
+      .map((el) => ({ el, top: el.scrollTop }));
+  }
+
+  private restoreHoverListScrolls(prev: Array<{ el: HTMLElement; top: number }>): void {
+    for (const { el, top } of prev) {
+      if (el.isConnected) el.scrollTop = top;
+    }
   }
 
   private buildTasksNavWidgetHtml(isFocusCorner = false): string {
@@ -1410,7 +1444,7 @@ export class LotusUI {
             <button type="button" id="welcome-close-btn" class="lotus-icon-close-btn" aria-label="Close">✕</button>
           </div>
 
-          <div class="lotus-modal-body">
+          <div class="lotus-modal-body" data-modal-id="welcome">
             <!-- 1. Point Appearance & Header Auto-Pop Switch -->
             <div class="lotus-setup-section">
               <div class="lotus-setup-label-row">
@@ -1545,8 +1579,8 @@ export class LotusUI {
               </div>
               <div class="lotus-proximity-controls-row">
                 <label class="lotus-slider-label">
-                  <span>Auto-Pop Radius: <strong class="lotus-tabular">${this.settings.proximityDistanceMeters.toFixed(1)}m</strong></span>
-                  <input type="range" id="prox-radius-slider" min="1.0" max="4.0" step="0.2" value="${this.settings.proximityDistanceMeters}" />
+                  <span>Auto-Pop Radius: <strong class="lotus-tabular" id="prox-radius-readout">${this.settings.proximityDistanceMeters.toFixed(1)}m</strong></span>
+                  <input type="range" id="prox-radius-slider" min="0.5" max="4.0" step="0.1" value="${this.settings.proximityDistanceMeters}" />
                 </label>
 
                 <button type="button" id="setup-flip-cam-btn" class="lotus-chip-btn">
@@ -1554,7 +1588,7 @@ export class LotusUI {
                 </button>
 
                 <button type="button" id="setup-step-dist-btn" class="lotus-chip-btn ${this.activeWaypointId === 'desk' ? 'is-active' : ''}">
-                  Test Distance: ${this.activeWaypointId === 'desk' ? 'Near (1.2m)' : 'Far (2.7m)'}
+                  Distance: ${this.activeWaypointId === 'desk' ? 'Near (1.2m)' : 'Far (2.7m)'}
                 </button>
 
                 <button type="button" id="toggle-room-mesh-btn" class="lotus-chip-btn ${!this.settings.showVirtualRoom ? 'is-active' : ''}">
@@ -1687,6 +1721,15 @@ export class LotusUI {
     radiusSlider?.addEventListener('input', () => {
       this.settings.proximityDistanceMeters = Number(radiusSlider.value);
       this.callbacks.onSettingsChange(this.settings);
+      // Update the readout in place — re-rendering the panel on 'input' would
+      // replace the slider DOM mid-drag and kill the drag gesture.
+      const readout = this.modalLayerEl.querySelector('#prox-radius-readout');
+      if (readout) {
+        readout.textContent = `${this.settings.proximityDistanceMeters.toFixed(1)}m`;
+      }
+    });
+    radiusSlider?.addEventListener('change', () => {
+      // Full panel refresh only after the drag fully ends.
       this.renderAllPanels();
     });
 
@@ -1734,7 +1777,7 @@ export class LotusUI {
             <button type="button" id="composer-close-btn" class="lotus-icon-close-btn" aria-label="Cancel">✕</button>
           </div>
 
-          <div class="lotus-modal-body">
+          <div class="lotus-modal-body" data-modal-id="composer">
             <div class="lotus-composer-top-row">
               <label class="lotus-field-group" style="flex: 1;">
                 <span class="lotus-field-label">Location / Object (e.g. Desk, Sofa, Fridge)</span>
@@ -2253,7 +2296,7 @@ export class LotusUI {
             <button type="button" id="inspector-close-btn" class="lotus-icon-close-btn" aria-label="Close">✕</button>
           </div>
 
-          <div class="lotus-modal-body">
+          <div class="lotus-modal-body" data-modal-id="inspector">
             <!-- Directly Editable Note Box + Mic Button -->
             <div class="lotus-full-note-box lotus-editable-note-box">
               <textarea
@@ -2580,7 +2623,7 @@ export class LotusUI {
             <button type="button" id="tasks-close-btn" class="lotus-icon-close-btn" aria-label="Close">✕</button>
           </div>
 
-          <div class="lotus-modal-body">
+          <div class="lotus-modal-body" data-modal-id="tasks">
             <!-- Add New Task / Reminder Form -->
             <div class="lotus-task-composer-box">
               <div class="lotus-task-composer-top">
@@ -3254,7 +3297,7 @@ export class LotusUI {
 
     // Hover interactions for bars
     bars
-      .on('pointerenter', (_event, d) => {
+      .on('pointerenter', (event, d) => {
         if (!tooltipEl) return;
         const titlesList =
           d.titles.length > 0
@@ -3263,11 +3306,23 @@ export class LotusUI {
                 .map((t) => `• ${this.escapeHtml(t)}`)
                 .join('<br/>')
             : 'No completed tasks on this day';
-        tooltipEl.style.display = 'block';
         tooltipEl.innerHTML = `
           <div class="lotus-d3-tooltip-head">${this.escapeHtml(d.dateLabel)} · <strong>${d.count} completed</strong></div>
           <div class="lotus-d3-tooltip-body">${titlesList}</div>
         `;
+        tooltipEl.style.display = 'block';
+        // Absolute positioning inside the chart card: anchor next to the pointer.
+        const card = chartContainer.parentElement;
+        if (card && event instanceof PointerEvent) {
+          const rect = card.getBoundingClientRect();
+          const left = Math.max(
+            6,
+            Math.min(event.clientX - rect.left + 14, rect.width - 250),
+          );
+          const top = Math.max(6, event.clientY - rect.top + 14);
+          tooltipEl.style.left = `${left}px`;
+          tooltipEl.style.top = `${top}px`;
+        }
       })
       .on('pointerleave', () => {
         if (tooltipEl) {
@@ -3336,7 +3391,7 @@ export class LotusUI {
             <button type="button" id="dir-close-btn" class="lotus-icon-close-btn" aria-label="Close">✕</button>
           </div>
 
-          <div class="lotus-modal-body">
+          <div class="lotus-modal-body" data-modal-id="directory">
             <div class="lotus-dir-sort-bar" role="group" aria-label="Sort saved pins">
               <span class="lotus-dir-sort-label">Sort by:</span>
               <div class="lotus-dir-sort-options">

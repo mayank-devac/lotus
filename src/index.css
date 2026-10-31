@@ -1779,6 +1779,14 @@ xrblocks-simulator-overlay-instructions {
 }
 
 .lotus-d3-tooltip {
+  /* Overlay next to the hovered bar instead of an in-flow block — an in-flow
+     tooltip reflows the chart card on every hover and breaks scrolling. */
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  max-width: 260px;
+  pointer-events: none;
+  z-index: 30;
   padding: 8px 12px;
   background: var(--bg);
   border: 1.5px solid var(--ink);
