@@ -1,0 +1,30 @@
+# AGENTS.md
+
+## What this repo is
+
+- LOTUS: single-page WebXR AR app — spatial memory pins anchored in the real room plus a study focus zone with peripheral blur timer. Browser-only; no backend, no native code.
+- `README.md` is **empty** — trust code and `index.html` meta tags, not the README.
+- Product spec and confirmed UX decisions (pin behavior, timer modes, "no AI auto-generation" constraint): `.plan/artifacts/implementation_plan.md`. Read it before product-level changes.
+
+## Commands (bun, not npm)
+
+- Package manager is **bun** — only `bun.lock` is committed, no `package-lock.json`. Use `bun install`, `bun run <script>`.
+- `bun run dev` — Vite dev server on `0.0.0.0:3000` (host bind is intentional for LAN device testing).
+- `bun run lint` — the ONLY quality gate, and despite the name it is `tsc --noEmit` (typecheck). There is no ESLint, no test suite, no CI. Run it after every change.
+- `bun run build` → `dist/`; `bun run preview` serves the build.
+- No env vars or API keys anywhere (nothing reads `process.env`/`import.meta.env`; no `vite.config.ts`).
+
+## Architecture / wiring
+
+- Entry: `index.html` → `src/index.ts`. On `DOMContentLoaded` it builds `xb.Options()` (title, camera `environment`, depth enabled, reticles disabled), then `xb.add(new LotusSpatialApp())` + `xb.init(options)`. There is no router; one screen.
+- xrblocks lifecycle: feature modules extend `xb.Script`, override `init()`/`dispose()`, and attach roots via `this.add(...)` (see `LotusSpatialApp` in `src/index.ts`). Camera access goes through `xb.core?.camera`.
+- **AR passthrough is NOT the WebXR camera API**: `src/CameraPassthrough.ts` gets a `getUserMedia` stream and renders a `<video>` element behind a transparent three.js canvas. Rear camera (`facingMode: 'environment'` ideal) with fallback to any webcam (desktop).
+- Persistence is 100% `localStorage` (`src/storage.ts`: pins, tasks, focus zone, settings). Data shapes live in `src/types.ts` and must stay JSON-serializable. Changing a schema requires a migration in `storage.ts` loaders, not just type edits.
+- UI (`src/LotusUI.ts`) is a DOM overlay using d3, not lit or @pmndrs/uikit. Voice dictation uses the Web Speech API directly and degrades gracefully when unsupported.
+- Sound is a zero-dependency WebAudio synth (`src/sound.ts`); all playback wrapped in try/catch for autoplay policy.
+
+## Gotchas
+
+- Camera (`getUserMedia`) and WebXR require a **secure context**: opening the dev server over plain `http://<lan-ip>:3000` on a phone/headset blocks the camera (localhost is fine in desktop browsers). Real-device AR testing needs HTTPS (tunnel) or localhost.
+- Must handle both input families: DOM mouse/touch **and** WebXR controller/hand pinch (`index.ts` has parallel drag/pinch state per family, e.g. `pinDragFromDOM` vs `xrDragPinId`). Changes to interaction code need both paths, or the app breaks on headset.
+- `metadata.json` declares `requestFramePermissions` (camera, microphone) for the xrblocks app builder — update it if requested permissions change.

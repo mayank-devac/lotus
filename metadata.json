@@ -1,0 +1,6 @@
+{
+  "name": "LOTUS",
+  "description": "Spatial AR memory pins and distraction-free study focus zone with proximity note headers, voice and XR keyboard input, and peripheral blur timer.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": []
+}

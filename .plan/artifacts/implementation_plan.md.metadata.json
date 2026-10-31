@@ -1,0 +1,6 @@
+{
+  "summary":  "Architectural and UX implementation plan for LocusAR: a WebXR & 3D spatial memory pin and study focus zone application built with XR Blocks and Three.js. Covers proximity-reactive 3D memory pins with voice/XR-keyboard input, interactive drag-to-select 3D focus volume with customizable peripheral blur/mask shields, and a configurable Welcome & Focus Timer control dock.",
+  "updatedAt":  "2026-10-30T23:36:12.314464141Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

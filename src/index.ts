@@ -1,0 +1,753 @@
+import * as THREE from 'three';
+import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
+import * as xb from 'xrblocks';
+
+import {CameraPassthrough} from './CameraPassthrough';
+import {FocusVolume3D} from './FocusVolume3D';
+import {LotusUI} from './LotusUI';
+import {PinManager3D} from './PinManager3D';
+import {StudyRoomBuilder} from './StudyRoomBuilder';
+import {lotusSound} from './sound';
+import {
+  DEFAULT_FOCUS_ZONE,
+  loadFocusZone,
+  loadLotusSettings,
+  loadSavedPins,
+  loadSavedTasks,
+  saveFocusZoneToStorage,
+  saveLotusSettings,
+  savePinsToStorage,
+  saveTasksToStorage,
+  vec3,
+} from './storage';
+import {
+  AppMode,
+  FocusZoneBounds,
+  LotusSettings,
+  LotusTask,
+  RoomWaypoint,
+  SpatialPin,
+  Vector3Data,
+} from './types';
+
+const _ndcPointer = new THREE.Vector2();
+const _camForward = new THREE.Vector3();
+const _camRight = new THREE.Vector3();
+const _rayPoint = new THREE.Vector3();
+const _lookAtTarget = new THREE.Vector3(0, 1.15, -1.5);
+const _desiredCamPos = new THREE.Vector3(0, 1.45, -0.25);
+const _desiredLookAt = new THREE.Vector3(0, 1.15, -1.5);
+
+/**
+ * Main XR Blocks script for LOTUS:
+ * Real-World Camera AR Memory Pins & Study Focus Zone with Timer-Driven Peripheral Blur.
+ */
+class LotusSpatialApp extends xb.Script {
+  private cameraPassthrough!: CameraPassthrough;
+  private roomBuilder!: StudyRoomBuilder;
+  private pinManager!: PinManager3D;
+  private focusVolume!: FocusVolume3D;
+  private ui!: LotusUI;
+
+  private pins: SpatialPin[] = [];
+  private tasks: LotusTask[] = [];
+  private focusZone: FocusZoneBounds = {...DEFAULT_FOCUS_ZONE};
+  private settings: LotusSettings = loadLotusSettings();
+  private mode: AppMode = 'explore';
+
+  private raycaster = new THREE.Raycaster();
+  private clock = new THREE.Clock();
+
+  // Dragging state for Focus Area selection
+  private isDraggingFocus = false;
+  private dragStart3D: Vector3Data | null = null;
+  private dragStartScreen = {x: 0, y: 0};
+
+  // Pinch / Drag-to-Move state for Spatial Pins
+  private activeDragPinId: string | null = null;
+  private hasMovedDuringPinDrag = false;
+  private pinDragFromDOM = false;
+  private pinDragStartScreen = {x: 0, y: 0};
+  private xrDragPinId: string | null = null;
+  private xrPinMoved = false;
+  private xrDragStartPos = new THREE.Vector3();
+
+  // Camera glide animation state
+  private isGlidingCamera = false;
+  private keysPressed: Record<string, boolean> = {};
+
+  init() {
+    this.pins = loadSavedPins();
+    this.tasks = loadSavedTasks();
+    this.focusZone = loadFocusZone();
+    this.settings = loadLotusSettings();
+    lotusSound.enabled = this.settings.soundEnabled;
+
+    // 1. Start Live Real-World Camera Feed immediately
+    this.cameraPassthrough = new CameraPassthrough();
+    void this.cameraPassthrough.startCamera('environment');
+
+    this.setupLightingAndTransparentCanvas();
+
+    // 2. Build optional 3D Study Room (hidden by default so user sees their real house camera)
+    this.roomBuilder = new StudyRoomBuilder();
+    this.roomBuilder.setVisible(this.settings.showVirtualRoom);
+    this.add(this.roomBuilder.root);
+
+    // 3. Build 3D Lotus Memory Pin Manager
+    this.pinManager = new PinManager3D();
+    this.pinManager.syncPins(this.pins, this.settings.defaultPinStyle);
+    this.add(this.pinManager.root);
+
+    // 4. Build 3D Focus Zone Volume
+    this.focusVolume = new FocusVolume3D(this.focusZone);
+    this.add(this.focusVolume.root);
+
+    // 5. Set initial camera pose
+    const camera = xb.core?.camera;
+    if (camera) {
+      camera.position.set(0, 1.45, -0.25);
+      camera.lookAt(0, 1.15, -1.5);
+      _desiredCamPos.copy(camera.position);
+    }
+
+    // 6. Initialize Simple, Clutter-Free UI
+    this.ui = new LotusUI(this.pins, this.tasks, this.focusZone, this.settings, {
+      onModeChange: (newMode) => {
+        this.mode = newMode;
+        this.pinManager.updatePreview(false);
+        this.focusVolume.setFocusTimerState(
+          this.ui.getIsTimerRunning() && this.settings.showVirtualRoom,
+          this.settings.shieldStyle,
+          newMode === 'focus-drag' && this.settings.showVirtualRoom,
+        );
+      },
+      onSavePin: (savedPin) => {
+        const idx = this.pins.findIndex((p) => p.id === savedPin.id);
+        if (idx >= 0) {
+          this.pins[idx] = savedPin;
+        } else {
+          this.pins.unshift(savedPin);
+        }
+        savePinsToStorage(this.pins);
+        this.pinManager.syncPins(this.pins, this.settings.defaultPinStyle);
+        this.ui.setPins(this.pins);
+      },
+      onDeletePin: (pinId) => {
+        this.pins = this.pins.filter((p) => p.id !== pinId);
+        savePinsToStorage(this.pins);
+        this.pinManager.syncPins(this.pins, this.settings.defaultPinStyle);
+        this.ui.setPins(this.pins);
+      },
+      onClearAllPins: () => {
+        this.pins = [];
+        savePinsToStorage(this.pins);
+        this.pinManager.syncPins(this.pins, this.settings.defaultPinStyle);
+        this.ui.setPins(this.pins);
+      },
+      onApplyStyleToAllPins: (style) => {
+        this.pins = this.pins.map((p) => ({...p, shapeStyle: style}));
+        savePinsToStorage(this.pins);
+        this.pinManager.syncPins(this.pins, style);
+        this.ui.setPins(this.pins);
+      },
+      onSaveTasks: (updatedTasks) => {
+        this.tasks = [...updatedTasks];
+        saveTasksToStorage(this.tasks);
+        this.ui.setTasks(this.tasks);
+      },
+      onHoverPin: (pinId) => {
+        this.pinManager.setHoveredPin(pinId);
+      },
+      onClickPinEffect: (pinId) => {
+        this.pinManager.triggerClickEffect(pinId);
+      },
+      onWalkToWaypoint: (wp: RoomWaypoint) => {
+        _desiredCamPos.set(wp.position.x, wp.position.y, wp.position.z);
+        _desiredLookAt.set(wp.lookAt.x, wp.lookAt.y, wp.lookAt.z);
+        this.isGlidingCamera = true;
+      },
+      onWalkToPin: (pin: SpatialPin) => {
+        _desiredCamPos.set(
+          pin.position.x,
+          Math.max(1.25, pin.position.y + 0.15),
+          pin.position.z + 1.15,
+        );
+        _desiredLookAt.set(pin.position.x, pin.position.y, pin.position.z);
+        this.isGlidingCamera = true;
+      },
+      onSettingsChange: (updatedSettings) => {
+        this.settings = {...updatedSettings};
+        saveLotusSettings(this.settings);
+        lotusSound.enabled = this.settings.soundEnabled;
+        this.roomBuilder.setVisible(this.settings.showVirtualRoom);
+        this.pinManager.syncPins(this.pins, this.settings.defaultPinStyle);
+        this.focusVolume.setFocusTimerState(
+          this.ui.getIsTimerRunning() && this.settings.showVirtualRoom,
+          this.settings.shieldStyle,
+          this.mode === 'focus-drag' && this.settings.showVirtualRoom,
+        );
+      },
+      onFocusZoneChange: (updatedZone) => {
+        this.focusZone = {...updatedZone};
+        saveFocusZoneToStorage(this.focusZone);
+      },
+      onTimerStateChange: (isRunning) => {
+        this.focusVolume.setFocusTimerState(
+          isRunning && this.settings.showVirtualRoom,
+          this.settings.shieldStyle,
+          this.mode === 'focus-drag' && this.settings.showVirtualRoom,
+        );
+      },
+      onFlipCamera: () => {
+        void this.cameraPassthrough.flipCamera();
+      },
+    });
+
+    this.bindPointerAndKeyboardEvents();
+  }
+
+  private setupLightingAndTransparentCanvas() {
+    const renderer = xb.core?.renderer as THREE.WebGLRenderer | undefined;
+    const scene = xb.core?.scene;
+    if (scene) {
+      scene.background = null;
+    }
+    if (renderer) {
+      try {
+        renderer.setClearColor(0x000000, 0);
+        if (scene) {
+          const pmrem = new THREE.PMREMGenerator(renderer);
+          scene.environment = pmrem.fromScene(
+            new RoomEnvironment(),
+            0.04,
+          ).texture;
+          pmrem.dispose();
+        }
+      } catch {
+        // Ignore if unsupported
+      }
+    }
+
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x334155, 2.4);
+    hemiLight.position.set(0, 3.0, 0);
+    this.add(hemiLight);
+
+    const keyLight = new THREE.DirectionalLight(0xfff7ed, 2.2);
+    keyLight.position.set(1.5, 3.5, 1.5);
+    this.add(keyLight);
+  }
+
+  private bindPointerAndKeyboardEvents() {
+    window.addEventListener('pointermove', (e) => this.handlePointerMove(e));
+    window.addEventListener('pointerdown', (e) => this.handlePointerDown(e));
+    window.addEventListener('pointerup', (e) => this.handlePointerUp(e));
+
+    window.addEventListener('keydown', (e) => {
+      if (this.isTypingInInput(e.target)) return;
+      this.keysPressed[e.code] = true;
+    });
+    window.addEventListener('keyup', (e) => {
+      this.keysPressed[e.code] = false;
+    });
+  }
+
+  private isTypingInInput(target: EventTarget | null): boolean {
+    if (!target || !(target instanceof HTMLElement)) return false;
+    const tag = target.tagName.toLowerCase();
+    return tag === 'input' || tag === 'textarea' || target.isContentEditable;
+  }
+
+  private isEventOnUI(e: PointerEvent): boolean {
+    const target = e.target as HTMLElement | null;
+    if (!target) return false;
+    return Boolean(
+      target.closest('.lotus-top-bar') ||
+        target.closest('.lotus-focus-corner-bar') ||
+        target.closest('.lotus-bottom-dock') ||
+        target.closest('.lotus-modal-card') ||
+        target.closest('.lotus-banner-pill') ||
+        target.closest('.lotus-corner-stop-btn'),
+    );
+  }
+
+  private getPinIdFromEventDOM(e: PointerEvent): string | null {
+    const target = e.target as HTMLElement | null;
+    if (!target) return null;
+    const marker = target.closest('.lotus-pin-marker') as HTMLElement | null;
+    return marker?.dataset.pinId || null;
+  }
+
+  private isEventOnPinDOM(e: PointerEvent): boolean {
+    return Boolean(this.getPinIdFromEventDOM(e));
+  }
+
+  private updateRaycasterFromPointer(e: PointerEvent): THREE.Camera | null {
+    const camera = xb.core?.camera;
+    if (!camera) return null;
+    _ndcPointer.x = (e.clientX / window.innerWidth) * 2 - 1;
+    _ndcPointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    this.raycaster.setFromCamera(_ndcPointer, camera);
+    return camera;
+  }
+
+  /**
+   * Raycasts against either WebXR depth mesh, virtual room furniture (if enabled),
+   * or a real-world spatial anchor plane 1.4m in front of the camera in Live Camera mode.
+   */
+  private raycastSpatialPoint(): {
+    point: Vector3Data;
+    normal: Vector3Data;
+    surfaceLabel: string;
+  } | null {
+    const targets: THREE.Object3D[] = [];
+    if (this.settings.showVirtualRoom) {
+      targets.push(...this.roomBuilder.interactableMeshes);
+    }
+    const depthMesh = (
+      xb.core as unknown as {depth?: {depthMesh?: THREE.Object3D}}
+    )?.depth?.depthMesh;
+    if (depthMesh) {
+      targets.push(depthMesh);
+    }
+
+    if (targets.length > 0) {
+      const hits = this.raycaster.intersectObjects(targets, true);
+      if (hits.length > 0) {
+        const hit = hits[0];
+        let label = 'Room Point';
+        let curr: THREE.Object3D | null = hit.object;
+        while (curr) {
+          if (curr.userData?.surfaceLabel) {
+            label = curr.userData.surfaceLabel;
+            break;
+          }
+          curr = curr.parent;
+        }
+        return {
+          point: vec3(hit.point.x, hit.point.y, hit.point.z),
+          normal: vec3(0, 1, 0),
+          surfaceLabel: label,
+        };
+      }
+    }
+
+    // In Real-World Camera mode, anchor point at 1.4m along the camera ray
+    this.raycaster.ray.at(1.4, _rayPoint);
+    return {
+      point: vec3(_rayPoint.x, _rayPoint.y, _rayPoint.z),
+      normal: vec3(0, 1, 0),
+      surfaceLabel: 'Room Object',
+    };
+  }
+
+  private handlePointerMove(e: PointerEvent) {
+    if (this.ui.isAnyModalOpen()) {
+      this.pinManager.updatePreview(false);
+      return;
+    }
+
+    if (!this.updateRaycasterFromPointer(e)) return;
+
+    // 0. If user is pinching/dragging a Pin to move & replace it
+    if (this.activeDragPinId) {
+      const dist = Math.hypot(
+        e.clientX - this.pinDragStartScreen.x,
+        e.clientY - this.pinDragStartScreen.y,
+      );
+      if (dist >= 6 || this.hasMovedDuringPinDrag) {
+        if (!this.hasMovedDuringPinDrag) {
+          this.hasMovedDuringPinDrag = true;
+          lotusSound.playHoverTick();
+          this.pinManager.setDraggingPin(this.activeDragPinId);
+        }
+        document.body.style.cursor = 'grabbing';
+        const hit = this.raycastSpatialPoint();
+        if (hit) {
+          this.pinManager.updatePinPositionLive(
+            this.activeDragPinId,
+            hit.point,
+            hit.surfaceLabel,
+          );
+          this.pinManager.updatePreview(
+            true,
+            hit.point,
+            this.clock.getElapsedTime(),
+          );
+          this.ui.setDraggingPinState(this.activeDragPinId, e.clientX, e.clientY);
+        }
+      }
+      return;
+    }
+
+    // 1. If actively dragging Focus Area
+    if (this.isDraggingFocus) {
+      const dragDist = Math.hypot(
+        e.clientX - this.dragStartScreen.x,
+        e.clientY - this.dragStartScreen.y,
+      );
+      if (dragDist >= 8) {
+        this.ui.updateDragBox2D(
+          true,
+          this.dragStartScreen.x,
+          this.dragStartScreen.y,
+          e.clientX,
+          e.clientY,
+        );
+        if (this.dragStart3D) {
+          const hit = this.raycastSpatialPoint();
+          if (hit) {
+            this.focusZone = this.focusVolume.setBoundsFromDrag(
+              this.dragStart3D,
+              hit.point,
+              'Focus Area',
+            );
+          }
+        }
+      }
+      return;
+    }
+
+    if (this.isEventOnUI(e)) {
+      this.pinManager.updatePreview(false);
+      this.pinManager.setHoveredPin(null);
+      this.ui.updatePinPlacementReticle(false);
+      return;
+    }
+
+    // If pointer is on the 2D hit target of a pin, LotusUI's pointerenter already manages hover
+    if (this.isEventOnPinDOM(e) && this.mode === 'explore') {
+      this.pinManager.updatePreview(false);
+      this.ui.updatePinPlacementReticle(false);
+      return;
+    }
+
+    // 2. Check 3D raycast pin hover
+    const pinHits = this.raycaster.intersectObjects(
+      this.pinManager.getHitMeshes(),
+      false,
+    );
+    if (pinHits.length > 0 && this.mode === 'explore') {
+      const hoveredId = pinHits[0].object.userData.pinId || null;
+      this.pinManager.setHoveredPin(hoveredId);
+      document.body.style.cursor = 'grab';
+    } else {
+      this.pinManager.setHoveredPin(null);
+      document.body.style.cursor =
+        this.mode === 'pin-add' || this.mode === 'focus-drag'
+          ? 'crosshair'
+          : 'default';
+    }
+
+    // 3. Preview marker in Pin Add mode
+    if (this.mode === 'pin-add') {
+      this.ui.updatePinPlacementReticle(true, e.clientX, e.clientY);
+      const hit = this.raycastSpatialPoint();
+      if (hit) {
+        this.pinManager.updatePreview(
+          true,
+          hit.point,
+          this.clock.getElapsedTime(),
+        );
+      }
+    } else {
+      this.ui.updatePinPlacementReticle(false);
+      this.pinManager.updatePreview(false);
+    }
+  }
+
+  private handlePointerDown(e: PointerEvent) {
+    if (e.button !== 0) return;
+    if (this.ui.isAnyModalOpen() || this.isEventOnUI(e)) return;
+    if (!this.updateRaycasterFromPointer(e)) return;
+
+    this.isGlidingCamera = false;
+
+    // 1. If in Focus Area Drag mode
+    if (this.mode === 'focus-drag') {
+      this.isDraggingFocus = true;
+      this.dragStartScreen = {x: e.clientX, y: e.clientY};
+      const hit = this.raycastSpatialPoint();
+      this.dragStart3D = hit ? hit.point : null;
+      return;
+    }
+
+    // 2. If in Pin Add mode, place a new memory point (or finish moving an existing pin) where tapped
+    if (this.mode === 'pin-add') {
+      const hit = this.raycastSpatialPoint();
+      if (hit) {
+        this.pinManager.updatePreview(false);
+        this.ui.openComposerForNewPin(
+          hit.point,
+          hit.normal,
+          hit.surfaceLabel,
+        );
+      }
+      return;
+    }
+
+    // 3. Check if user pressed/pinched on a 2D pin marker (card or hit target) to drag or inspect
+    const domPinId = this.getPinIdFromEventDOM(e);
+    if (domPinId) {
+      this.activeDragPinId = domPinId;
+      this.hasMovedDuringPinDrag = false;
+      this.pinDragFromDOM = true;
+      this.pinDragStartScreen = {x: e.clientX, y: e.clientY};
+      return;
+    }
+
+    // 4. Check if user pressed/pinched an existing 3D Lotus Pin via 3D raycast to drag or inspect
+    const pinHits = this.raycaster.intersectObjects(
+      this.pinManager.getHitMeshes(),
+      false,
+    );
+    if (pinHits.length > 0) {
+      const pinId = pinHits[0].object.userData.pinId;
+      if (pinId) {
+        this.activeDragPinId = pinId;
+        this.hasMovedDuringPinDrag = false;
+        this.pinDragFromDOM = false;
+        this.pinDragStartScreen = {x: e.clientX, y: e.clientY};
+        return;
+      }
+    }
+  }
+
+  // Support WebXR controller / hand pinch selection and pinch-drag directly on 3D points
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  override onSelectStart(event: any) {
+    if (this.ui.isAnyModalOpen()) return;
+    const targetObj = event?.target as THREE.Object3D | undefined;
+    let curr: THREE.Object3D | null | undefined = targetObj;
+    while (curr) {
+      if (curr.userData?.pinId) {
+        const pinId = curr.userData.pinId as string;
+        this.xrDragPinId = pinId;
+        this.xrPinMoved = false;
+        const controller = event?.source?.controller as
+          | THREE.Object3D
+          | undefined;
+        if (controller) {
+          controller.getWorldPosition(this.xrDragStartPos);
+        }
+        this.pinManager.setDraggingPin(pinId);
+        return;
+      }
+      curr = curr.parent;
+    }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  override onSelecting(event: any) {
+    if (!this.xrDragPinId) return;
+    const controller = event?.source?.controller as THREE.Object3D | undefined;
+    if (!controller) return;
+
+    const currentControllerPos = new THREE.Vector3();
+    controller.getWorldPosition(currentControllerPos);
+    if (currentControllerPos.distanceTo(this.xrDragStartPos) > 0.025) {
+      this.xrPinMoved = true;
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(
+        controller.quaternion,
+      );
+      this.raycaster.set(currentControllerPos, forward.normalize());
+      const hit = this.raycastSpatialPoint();
+      if (hit) {
+        this.pinManager.updatePinPositionLive(
+          this.xrDragPinId,
+          hit.point,
+          hit.surfaceLabel,
+        );
+      }
+    }
+  }
+
+  override onSelectEnd() {
+    if (!this.xrDragPinId) return;
+    const pinId = this.xrDragPinId;
+    const moved = this.xrPinMoved;
+    this.xrDragPinId = null;
+    this.xrPinMoved = false;
+    this.pinManager.setDraggingPin(null);
+
+    if (moved) {
+      savePinsToStorage(this.pins);
+      this.ui.setPins(this.pins);
+      this.pinManager.triggerClickEffect(pinId);
+      lotusSound.playPinCreated();
+    } else {
+      this.ui.inspectPin(pinId);
+    }
+  }
+
+  private handlePointerUp(e: PointerEvent) {
+    if (this.activeDragPinId) {
+      const draggedId = this.activeDragPinId;
+      const wasDragged = this.hasMovedDuringPinDrag;
+      const fromDOM = this.pinDragFromDOM;
+
+      this.activeDragPinId = null;
+      this.hasMovedDuringPinDrag = false;
+      this.pinDragFromDOM = false;
+      this.pinManager.setDraggingPin(null);
+      this.pinManager.updatePreview(false);
+      this.ui.setDraggingPinState(null);
+      document.body.style.cursor = 'default';
+
+      if (wasDragged) {
+        this.ui.markPinJustDragged(draggedId);
+        savePinsToStorage(this.pins);
+        this.pinManager.syncPins(this.pins, this.settings.defaultPinStyle);
+        this.ui.setPins(this.pins);
+        this.ui.refreshPinMarkerContent();
+        this.pinManager.triggerClickEffect(draggedId);
+        lotusSound.playPinCreated();
+      } else if (!fromDOM) {
+        this.ui.inspectPin(draggedId);
+      }
+      return;
+    }
+
+    if (this.isDraggingFocus) {
+      this.isDraggingFocus = false;
+      this.ui.updateDragBox2D(false);
+
+      const dragDist = Math.hypot(
+        e.clientX - this.dragStartScreen.x,
+        e.clientY - this.dragStartScreen.y,
+      );
+
+      if (dragDist >= 12) {
+        const left = Math.min(this.dragStartScreen.x, e.clientX);
+        const top = Math.min(this.dragStartScreen.y, e.clientY);
+        const width = Math.max(80, Math.abs(e.clientX - this.dragStartScreen.x));
+        const height = Math.max(80, Math.abs(e.clientY - this.dragStartScreen.y));
+
+        this.ui.completeFocusAreaDrag(
+          {
+            visible: true,
+            x: left,
+            y: top,
+            width,
+            height,
+          },
+          this.focusZone,
+        );
+      }
+
+      this.dragStart3D = null;
+    }
+  }
+
+  update() {
+    const delta = Math.min(this.clock.getDelta(), 0.1);
+    const elapsed = this.clock.getElapsedTime();
+    const camera = xb.core?.camera;
+    if (!camera) return;
+
+    // Keep WebGL background transparent so real-world camera feed is visible
+    const renderer = xb.core?.renderer as THREE.WebGLRenderer | undefined;
+    if (renderer && !this.settings.showVirtualRoom) {
+      renderer.setClearColor(0x000000, 0);
+    }
+
+    if (this.isGlidingCamera) {
+      camera.position.x = THREE.MathUtils.damp(
+        camera.position.x,
+        _desiredCamPos.x,
+        5.5,
+        delta,
+      );
+      camera.position.y = THREE.MathUtils.damp(
+        camera.position.y,
+        _desiredCamPos.y,
+        5.5,
+        delta,
+      );
+      camera.position.z = THREE.MathUtils.damp(
+        camera.position.z,
+        _desiredCamPos.z,
+        5.5,
+        delta,
+      );
+
+      _lookAtTarget.lerp(_desiredLookAt, Math.min(1, delta * 6));
+      camera.lookAt(_lookAtTarget);
+
+      if (camera.position.distanceToSquared(_desiredCamPos) < 0.002) {
+        this.isGlidingCamera = false;
+      }
+    }
+
+    // Arrow-key stepping to test 2m proximity
+    const moveSpeed = 1.6 * delta;
+    if (
+      this.keysPressed['ArrowUp'] ||
+      this.keysPressed['ArrowDown'] ||
+      this.keysPressed['ArrowLeft'] ||
+      this.keysPressed['ArrowRight']
+    ) {
+      this.isGlidingCamera = false;
+      camera.getWorldDirection(_camForward);
+      _camForward.y = 0;
+      if (_camForward.lengthSq() > 0.0001) _camForward.normalize();
+      _camRight.crossVectors(_camForward, THREE.Object3D.DEFAULT_UP).normalize();
+
+      if (this.keysPressed['ArrowUp']) {
+        camera.position.addScaledVector(_camForward, moveSpeed);
+      }
+      if (this.keysPressed['ArrowDown']) {
+        camera.position.addScaledVector(_camForward, -moveSpeed);
+      }
+      if (this.keysPressed['ArrowRight']) {
+        camera.position.addScaledVector(_camRight, moveSpeed);
+      }
+      if (this.keysPressed['ArrowLeft']) {
+        camera.position.addScaledVector(_camRight, -moveSpeed);
+      }
+    }
+
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const pinProjections = this.pinManager.updateAndProject(
+      camera,
+      delta,
+      elapsed,
+      this.settings.proximityDistanceMeters,
+      this.settings.proximityMode,
+      this.settings.headerPopEnabled,
+      this.settings.defaultPinStyle,
+      vw,
+      vh,
+    );
+
+    this.focusVolume.updateShaderTime(elapsed);
+    const focusRect = this.focusVolume.projectFocusWindow(camera, vw, vh);
+    this.ui.updateFrameProjections(pinProjections, focusRect, {
+      x: camera.position.x,
+      y: camera.position.y,
+      z: camera.position.z,
+    });
+  }
+
+  dispose() {
+    this.cameraPassthrough?.stopCamera();
+    this.roomBuilder?.dispose();
+    this.pinManager?.dispose();
+    this.focusVolume?.dispose();
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const options = new xb.Options();
+  options.setAppTitle('LOTUS');
+  options.setAppDescription(
+    'Real-world camera AR memory pins and distraction-free study focus zone.',
+  );
+  options.enableCamera('environment');
+  options.enableDepth();
+  options.reticles.enabled = false;
+
+  xb.add(new LotusSpatialApp());
+  xb.init(options);
+});
