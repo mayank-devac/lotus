@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
 import * as xb from 'xrblocks';
 
+import {CameraGate} from './CameraGate';
 import {CameraPassthrough} from './CameraPassthrough';
 import {FocusVolume3D} from './FocusVolume3D';
 import {LotusUI} from './LotusUI';
@@ -48,6 +49,8 @@ class LotusSpatialApp extends xb.Script {
   private pinManager!: PinManager3D;
   private focusVolume!: FocusVolume3D;
   private ui!: LotusUI;
+  private cameraGate?: CameraGate;
+  private webcamWanted = false;
 
   private pins: SpatialPin[] = [];
   private tasks: LotusTask[] = [];
@@ -83,9 +86,12 @@ class LotusSpatialApp extends xb.Script {
     this.settings = loadLotusSettings();
     lotusSound.enabled = this.settings.soundEnabled;
 
-    // 1. Start Live Real-World Camera Feed immediately
+    // 1. Ask for the camera via an explicit onboarding card (user tap triggers
+    //    the browser prompt). Headsets skip this: the system passthrough is
+    //    used once the immersive-ar session starts.
     this.cameraPassthrough = new CameraPassthrough();
-    void this.cameraPassthrough.startCamera('environment');
+    void this.setupCameraAccess();
+    this.bindXRSessionEvents();
 
     this.setupLightingAndTransparentCanvas();
 
@@ -207,6 +213,91 @@ class LotusSpatialApp extends xb.Script {
     this.bindPointerAndKeyboardEvents();
   }
 
+  /**
+   * In an immersive-ar session (Meta Quest, Android XR…) the headset composites
+   * real-world passthrough itself, so release the getUserMedia stream and hide
+   * the onboarding card. When the session ends, fall back to the web camera.
+   */
+  private async setupCameraAccess() {
+    // Devices (or emulators) with immersive-ar get their camera view from the
+    // XR session, so the webcam is never opened and no gate is shown.
+    let xrArSupported = false;
+    try {
+      xrArSupported = Boolean(
+        await navigator.xr?.isSessionSupported('immersive-ar'),
+      );
+    } catch {
+      // WebXR unavailable.
+    }
+    if (xrArSupported) return;
+
+    // Otherwise the webcam opens only after an explicit tap on the gate.
+    this.cameraGate = new CameraGate(
+      async () => {
+        const ok = await this.cameraPassthrough.startCamera('environment');
+        this.webcamWanted = ok;
+        return ok;
+      },
+      () => {},
+    );
+  }
+
+  private bindXRSessionEvents() {
+    const renderer = xb.core?.renderer as THREE.WebGLRenderer | undefined;
+    const xrManager = renderer?.xr;
+    if (!xrManager) return;
+    xrManager.addEventListener('sessionstart', () => {
+      this.cameraGate?.hide();
+      this.cameraPassthrough.stopCamera();
+      this.cameraPassthrough.setVisible(false);
+    });
+    xrManager.addEventListener('sessionend', () => {
+      if (this.webcamWanted) {
+        this.cameraPassthrough.setVisible(true);
+        void this.cameraPassthrough.startCamera();
+      }
+    });
+  }
+
+  /**
+   * Headsets have no mouse or DOM UI, so a trigger/pinch on empty space drops
+   * a pin where the controller/hand ray lands (depth mesh when available).
+   * Title and note can be edited later from the 2D panel.
+   */
+  private dropPinFromXRRay(controller: THREE.Object3D) {
+    const origin = new THREE.Vector3();
+    controller.getWorldPosition(origin);
+    const dir = new THREE.Vector3(0, 0, -1)
+      .applyQuaternion(controller.getWorldQuaternion(new THREE.Quaternion()))
+      .normalize();
+    this.raycaster.set(origin, dir);
+    const hit = this.raycastSpatialPoint();
+    if (!hit) return;
+
+    const pin: SpatialPin = {
+      id: `pin-${Date.now()}`,
+      title: `Pin ${this.pins.length + 1}`,
+      body: `Dropped on ${hit.surfaceLabel}.`,
+      surfaceLabel: hit.surfaceLabel,
+      color: this.settings.defaultPinColor || '#E84D2B',
+      shapeStyle: this.settings.defaultPinStyle,
+      position: hit.point,
+      normal: hit.normal,
+      createdAt: Date.now(),
+    };
+    this.pins.unshift(pin);
+    savePinsToStorage(this.pins);
+    this.pinManager.syncPins(this.pins, this.settings.defaultPinStyle);
+    this.ui.setPins(this.pins);
+    this.pinManager.triggerClickEffect(pin.id);
+    lotusSound.playPinCreated();
+  }
+
+  private isXRPresenting(): boolean {
+    const renderer = xb.core?.renderer as THREE.WebGLRenderer | undefined;
+    return Boolean(renderer?.xr?.isPresenting);
+  }
+
   private setupLightingAndTransparentCanvas() {
     const renderer = xb.core?.renderer as THREE.WebGLRenderer | undefined;
     const scene = xb.core?.scene;
@@ -242,6 +333,7 @@ class LotusSpatialApp extends xb.Script {
     window.addEventListener('pointermove', (e) => this.handlePointerMove(e));
     window.addEventListener('pointerdown', (e) => this.handlePointerDown(e));
     window.addEventListener('pointerup', (e) => this.handlePointerUp(e));
+    window.addEventListener('contextmenu', (e) => e.preventDefault());
 
     window.addEventListener('keydown', (e) => {
       if (this.isTypingInInput(e.target)) return;
@@ -535,6 +627,14 @@ class LotusSpatialApp extends xb.Script {
       }
       curr = curr.parent;
     }
+
+    // No pin under the ray: in a headset, place a new pin there.
+    if (this.isXRPresenting() && this.mode !== 'focus-drag') {
+      const controller = event?.source?.controller as
+        | THREE.Object3D
+        | undefined;
+      if (controller) this.dropPinFromXRRay(controller);
+    }
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -731,6 +831,7 @@ class LotusSpatialApp extends xb.Script {
   }
 
   dispose() {
+    this.cameraGate?.hide();
     this.cameraPassthrough?.stopCamera();
     this.roomBuilder?.dispose();
     this.pinManager?.dispose();
@@ -744,6 +845,13 @@ document.addEventListener('DOMContentLoaded', () => {
   options.setAppDescription(
     'Real-world camera AR memory pins and distraction-free study focus zone.',
   );
+  // The xrblocks simulator auto-starts on non-XR browsers and paints its own
+  // virtual room over the page, hiding the real camera feed. Real devices
+  // (Quest, Android XR) use immersive-ar passthrough; everything else uses the
+  // getUserMedia video behind the transparent canvas.
+  // options.enableSimulator = auto;
+  // options.xrButton.alwaysAutostartSimulator = false;
+  // options.xrButton.showEnterSimulatorButton = false;
   options.enableCamera('environment');
   options.enableDepth();
   options.reticles.enabled = false;

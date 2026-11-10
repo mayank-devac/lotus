@@ -12,6 +12,7 @@ import {
   PinSortBy,
   ProjectedRect,
   RoomWaypoint,
+  AmbientLightMode,
   ShieldStyle,
   SpatialPin,
   TaskFilterTab,
@@ -139,6 +140,7 @@ export class LotusUI {
 
   // DOM References
   private proximityPulseLayerEl!: HTMLElement;
+  private pinAmbientStartedAt = new Map<string, number>();
   private pinCornerPulseElements = new Map<string, HTMLElement>();
   private pinLayerEl!: HTMLElement;
   private pinMarkerElements = new Map<string, HTMLElement>();
@@ -755,7 +757,31 @@ export class LotusUI {
         proj.screenY >= viewMargin &&
         proj.screenY <= vh - viewMargin;
 
-      if (isWithinRadius && !isInViewpoint) {
+      const ambientMode = this.settings.ambientLightMode ?? 'timer';
+      const ambientAllowed =
+        ambientMode === 'all' ||
+        (ambientMode === 'timer' &&
+          (this.isTimerRunning ||
+            this.tasks.some((t) => !t.completed && t.timerRunning)));
+      const nowMs = performance.now();
+      let ambientPhase: 'off' | 'on' | 'flicker' = 'off';
+      if (ambientAllowed && isWithinRadius && !isInViewpoint) {
+        let startedAt = this.pinAmbientStartedAt.get(pin.id);
+        if (startedAt === undefined) {
+          startedAt = nowMs;
+          this.pinAmbientStartedAt.set(pin.id, startedAt);
+        }
+        const durMs =
+          Math.max(1, this.settings.ambientLightDurationSec ?? 6) * 1000;
+        const elapsed = nowMs - startedAt;
+        ambientPhase =
+          elapsed < durMs ? 'on' : elapsed < durMs + 1300 ? 'flicker' : 'off';
+      } else {
+        this.pinAmbientStartedAt.delete(pin.id);
+      }
+      pulseEl.classList.toggle('is-flickering', ambientPhase === 'flicker');
+
+      if (ambientPhase !== 'off') {
         const closeness = Math.max(
           0.28,
           Math.min(
@@ -856,8 +882,9 @@ export class LotusUI {
         '#lotus-focus-window-label',
       );
       if (labelSpan) {
+        const formatted = this.formatClockDisplay();
         labelSpan.textContent = this.isTimerRunning
-          ? `FOCUS · ${this.formatClockDisplay()}`
+          ? `FOCUS${formatted ? ` · ${formatted}` : ''}`
           : 'FOCUS AREA';
       }
     }
@@ -1027,6 +1054,13 @@ export class LotusUI {
   }
 
   private formatClockDisplay(): string {
+    if (
+      this.settings.timerMode === 'stopwatch' &&
+      this.timerElapsedSec === 0
+    ) {
+      return '';
+    }
+
     const totalSec =
       this.settings.timerMode === 'stopwatch'
         ? this.timerElapsedSec
@@ -1044,7 +1078,7 @@ export class LotusUI {
       '#lotus-focus-window-label',
     );
     if (labelSpan && this.isTimerRunning) {
-      labelSpan.textContent = `FOCUS · ${formatted}`;
+      labelSpan.textContent = `FOCUS${formatted ? ` · ${formatted}` : ''}`;
     }
   }
 
@@ -1099,6 +1133,7 @@ export class LotusUI {
     const ongoingTasksCount = ongoingTasks.length;
     const hasRunning = ongoingTasks.some((t) => t.timerRunning);
     const btnLabelHtml = this.getTasksNavButtonLabelHtml();
+    const focusClock = this.formatClockDisplay();
 
     const hoverTaskRowsHtml =
       ongoingTasks.length === 0
@@ -1151,7 +1186,7 @@ export class LotusUI {
         <div class="lotus-tasks-hover-card" role="region" aria-label="Ongoing task with timer">
           <div class="lotus-tasks-hover-header">
             <span>ONGOING TASK (${ongoingTasksCount})</span>
-            <span class="lotus-tabular">FOCUS ⏱ ${this.formatClockDisplay()}</span>
+            <span class="lotus-tabular">FOCUS${focusClock ? ` ⏱ ${focusClock}` : ''}</span>
           </div>
           <div class="lotus-tasks-hover-list">
             ${hoverTaskRowsHtml}
@@ -1583,6 +1618,20 @@ export class LotusUI {
                   <input type="range" id="prox-radius-slider" min="0.5" max="4.0" step="0.1" value="${this.settings.proximityDistanceMeters}" />
                 </label>
 
+                <label class="lotus-slider-label">
+                  <span>Light Duration: <strong class="lotus-tabular" id="ambient-duration-readout">${this.settings.ambientLightDurationSec}s</strong></span>
+                  <input type="range" id="ambient-duration-slider" min="2" max="30" step="1" value="${this.settings.ambientLightDurationSec}" />
+                </label>
+
+                <label class="lotus-slider-label is-wide">
+                  <span>Ambient Border Light</span>
+                  <select id="ambient-mode-select" class="lotus-select">
+                    <option value="none" ${this.settings.ambientLightMode === 'none' ? 'selected' : ''}>None</option>
+                    <option value="timer" ${this.settings.ambientLightMode === 'timer' ? 'selected' : ''}>Timer running</option>
+                    <option value="all" ${this.settings.ambientLightMode === 'all' ? 'selected' : ''}>Every pin</option>
+                  </select>
+                </label>
+
                 <button type="button" id="setup-flip-cam-btn" class="lotus-chip-btn">
                   Flip Camera
                 </button>
@@ -1731,6 +1780,24 @@ export class LotusUI {
     radiusSlider?.addEventListener('change', () => {
       // Full panel refresh only after the drag fully ends.
       this.renderAllPanels();
+    });
+
+    this.modalLayerEl
+      .querySelector('#ambient-mode-select')
+      ?.addEventListener('change', (e) => {
+        this.settings.ambientLightMode = (e.target as HTMLSelectElement)
+          .value as AmbientLightMode;
+        this.pinAmbientStartedAt.clear();
+        this.callbacks.onSettingsChange(this.settings);
+      });
+    const ambientSlider = this.modalLayerEl.querySelector(
+      '#ambient-duration-slider',
+    ) as HTMLInputElement | null;
+    ambientSlider?.addEventListener('input', () => {
+      this.settings.ambientLightDurationSec = Number(ambientSlider.value);
+      this.callbacks.onSettingsChange(this.settings);
+      const r = this.modalLayerEl.querySelector('#ambient-duration-readout');
+      if (r) r.textContent = `${this.settings.ambientLightDurationSec}s`;
     });
 
     this.modalLayerEl

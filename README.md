@@ -10,7 +10,7 @@
   while a timer runs. Browser-only — no backend, no accounts, no native code.
 </p>
 
----
+
 
 ## What is LOTUS?
 

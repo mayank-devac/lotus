@@ -63,6 +63,8 @@ export const DEFAULT_SETTINGS: LotusSettings = {
   proximityMode: 'proximity-2m',
   proximityDistanceMeters: 0.5,
   headerPopEnabled: false,
+  ambientLightMode: 'timer',
+  ambientLightDurationSec: 6,
   defaultPinStyle: 'revolving',
   defaultPinColor: '#E84D2B',
   showVirtualRoom: false, // Real-world live camera AR by default

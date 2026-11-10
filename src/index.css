@@ -837,10 +837,64 @@ xrblocks-simulator-overlay-instructions {
 .lotus-preset-row,
 .lotus-custom-time-row,
 .lotus-proximity-controls-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+  gap: 12px 14px;
+}
+
+.lotus-timer-subconfig {
+  margin-top: -2px;
+}
+
+.lotus-preset-row {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.lotus-preset-row > .lotus-chip-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  text-align: center;
+}
+
+.lotus-custom-time-row {
+  margin-top: 0;
+}
+
+.lotus-proximity-controls-row .lotus-slider-label {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 0;
+}
+
+.lotus-proximity-controls-row .lotus-slider-label input[type='range'],
+.lotus-proximity-controls-row .lotus-select {
+  width: 100%;
+  margin: 0;
+}
+
+.lotus-proximity-controls-row .lotus-slider-label.is-wide {
+  grid-column: 1 / -1;
+}
+
+.lotus-proximity-controls-row .lotus-chip-btn {
+  width: 100%;
+  text-align: center;
+}
+
+.lotus-proximity-controls-row > .lotus-chip-btn:last-child {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 480px) {
+  .lotus-proximity-controls-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 .lotus-chip-btn {
@@ -2200,6 +2254,32 @@ xrblocks-simulator-overlay-instructions {
     lotusCornerScreenPulse 2.4s ease-in-out 0.95s infinite;
 }
 
+.lotus-pin-corner-pulse.is-flickering {
+  animation: lotusAmbientFlicker 1.3s steps(1, end) forwards;
+}
+
+@keyframes lotusAmbientFlicker {
+  0% { opacity: 0.9; }
+  12% { opacity: 0.1; }
+  25% { opacity: 0.8; }
+  38% { opacity: 0; }
+  52% { opacity: 0.6; }
+  66% { opacity: 0.05; }
+  80% { opacity: 0.35; }
+  100% { opacity: 0; }
+}
+
+.lotus-select {
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.4);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
 @keyframes lotusCornerScreenPulse {
   0%,
   100% {
@@ -2263,4 +2343,87 @@ xrblocks-simulator-overlay-instructions {
   .lotus-dock-cta {
     padding: 0.7rem 1.25rem;
   }
+}
+
+/* ---------- Camera permission gate ---------- */
+.lotus-camera-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(27, 27, 25, 0.55);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  font-family: var(--font-body);
+}
+
+.lotus-camera-gate-card {
+  width: min(420px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 24px;
+  background: var(--bg);
+  color: var(--ink);
+  border: 2px solid var(--border-ink);
+  box-shadow: 6px 6px 0 var(--border-ink);
+}
+
+.lotus-camera-gate-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.18em;
+  color: var(--accent);
+}
+
+.lotus-camera-gate-card h1 {
+  margin: 0;
+  font-size: 1.6rem;
+  line-height: 1.15;
+}
+
+.lotus-camera-gate-copy,
+.lotus-camera-gate-headset,
+.lotus-camera-gate-status {
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.45;
+  color: var(--ink-muted);
+}
+
+.lotus-camera-gate-headset {
+  padding: 10px 12px;
+  border: 1px dashed var(--border-ink);
+  color: var(--ink);
+}
+
+.lotus-camera-gate-primary,
+.lotus-camera-gate-secondary {
+  font: inherit;
+  font-weight: 700;
+  min-height: 48px;
+  cursor: pointer;
+  border: 2px solid var(--border-ink);
+}
+
+.lotus-camera-gate-primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.lotus-camera-gate-primary:disabled {
+  opacity: 0.7;
+  cursor: progress;
+}
+
+.lotus-camera-gate-secondary {
+  background: transparent;
+  color: var(--ink);
+}
+
+.lotus-camera-gate-status.is-error {
+  color: #b42318;
 }

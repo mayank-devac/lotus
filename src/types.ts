@@ -3,6 +3,7 @@ export type ShieldStyle = 'frosted' | 'dark' | 'ambient';
 export type AppMode = 'explore' | 'pin-add' | 'focus-drag';
 export type ProximityDisplayMode = 'proximity-2m' | 'always' | 'reticle-only';
 export type PinShapeStyle = 'revolving' | 'dot';
+export type AmbientLightMode = 'none' | 'timer' | 'all';
 export type PinSortBy = 'proximity' | 'date';
 export type TaskItemType = 'task' | 'reminder';
 export type TaskFilterTab = 'all' | 'ongoing' | 'completed' | 'insights';
@@ -58,6 +59,8 @@ export interface LotusSettings {
   proximityMode: ProximityDisplayMode;
   proximityDistanceMeters: number;
   headerPopEnabled: boolean;
+  ambientLightMode: AmbientLightMode;
+  ambientLightDurationSec: number;
   defaultPinStyle: PinShapeStyle;
   defaultPinColor: string;
   showVirtualRoom: boolean;
