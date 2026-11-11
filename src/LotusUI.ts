@@ -1838,6 +1838,9 @@ export class LotusUI {
   private renderNoteComposerModal() {
     this.modalLayerEl.style.pointerEvents = 'auto';
     const isEditing = Boolean(this.editingPinId);
+    // Typing on the XR keyboard (and chip/color taps) re-renders this modal on
+    // every interaction; keep the modal body scrolled where the user left it.
+    const prevModalScroll = this.captureModalBodyScroll();
 
     this.modalLayerEl.innerHTML = `
       <div class="lotus-modal-backdrop">
@@ -2107,6 +2110,7 @@ export class LotusUI {
         this.syncComposerInputsFromDOM();
         this.xrKeyboardShift = !this.xrKeyboardShift;
         this.renderNoteComposerModal();
+        this.focusActiveComposerField();
       });
 
     this.modalLayerEl
@@ -2183,6 +2187,7 @@ export class LotusUI {
         this.refreshPinMarkerContent();
         this.renderAllPanels();
       });
+    this.restoreModalBodyScroll(prevModalScroll);
   }
 
   private syncComposerInputsFromDOM() {
