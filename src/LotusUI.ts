@@ -2391,9 +2391,10 @@ export class LotusUI {
 
             <!-- Instant 1-Tap Color & Point Style Controls -->
             <div class="lotus-setup-section" style="padding-top: 4px; border-bottom: none; padding-bottom: 0;">
-              <div class="lotus-proximity-controls-row" style="justify-content: space-between;">
-                <div class="lotus-inline-field">
-                  <span>Style:</span>
+              <div class="lotus-inspector-style-stack">
+                <div class="lotus-inspector-field">
+                  <span class="lotus-field-label">Style</span>
+                  <div class="lotus-preset-row">
                   <button
                     type="button"
                     data-quick-style="revolving"
@@ -2408,10 +2409,11 @@ export class LotusUI {
                   >
                     ● Minimalistic Dot
                   </button>
+                  </div>
                 </div>
 
-                <div class="lotus-inline-field">
-                  <span>Color:</span>
+                <div class="lotus-inspector-field">
+                  <span class="lotus-field-label">Color</span>
                   <div class="lotus-color-swatch-row">
                     ${PIN_COLOR_OPTIONS.map(
                       (c) => `

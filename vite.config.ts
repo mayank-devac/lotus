@@ -5,4 +5,6 @@ import { defineConfig } from 'vite';
 // repository name. Use '/' instead only when serving from a domain root.
 export default defineConfig({
   base: './',
+  // Force a single copy of three.js across the app and xrblocks.
+  resolve: { dedupe: ['three'] },
 });

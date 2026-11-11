@@ -49,7 +49,7 @@ body {
   opacity: 0.88;
 }
 
-canvas {
+canvas.lotus-canvas {
   position: fixed !important;
   inset: 0 !important;
   z-index: 5 !important;
@@ -1030,9 +1030,24 @@ xrblocks-simulator-overlay-instructions {
 
 .lotus-color-swatch-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  gap: 10px;
+  padding: 4px 2px;
+}
+
+.lotus-inspector-style-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.lotus-inspector-field {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
-  padding: 4px 0;
+  min-width: 0;
 }
 
 .lotus-color-swatch {
@@ -2414,9 +2429,41 @@ xrblocks-simulator-overlay-instructions {
   color: #fff;
 }
 
-.lotus-camera-gate-primary:disabled {
-  opacity: 0.7;
+.lotus-camera-gate-primary:disabled,
+.lotus-camera-gate-secondary:disabled {
+  opacity: 0.6;
   cursor: progress;
+}
+
+/* "Enable camera" once Enter XR is the main action: outlined in the accent
+   colour so it stays distinct from "Continue without camera". */
+.lotus-camera-gate-primary.is-fallback {
+  background: transparent;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Stays on screen after the card is dismissed on XR-capable devices. */
+.lotus-enter-xr-chip {
+  position: fixed;
+  left: 1.75rem;
+  bottom: 1.75rem;
+  z-index: 46;
+  min-height: 44px;
+  padding: 0 16px;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: var(--accent);
+  color: #fff;
+  border: 2px solid var(--border-ink);
+  box-shadow: 3px 3px 0 var(--border-ink);
+}
+
+.lotus-enter-xr-chip[hidden] {
+  display: none;
 }
 
 .lotus-camera-gate-secondary {

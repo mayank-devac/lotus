@@ -59,7 +59,7 @@ class LotusSpatialApp extends xb.Script {
   private mode: AppMode = 'explore';
 
   private raycaster = new THREE.Raycaster();
-  private clock = new THREE.Clock();
+  private unbindXRSession?: () => void;
 
   // Dragging state for Focus Area selection
   private isDraggingFocus = false;
@@ -86,11 +86,11 @@ class LotusSpatialApp extends xb.Script {
     this.settings = loadLotusSettings();
     lotusSound.enabled = this.settings.soundEnabled;
 
-    // 1. Ask for the camera via an explicit onboarding card (user tap triggers
-    //    the browser prompt). Headsets skip this: the system passthrough is
-    //    used once the immersive-ar session starts.
+    // 1. Show the onboarding card on every device. A user tap either opens the
+    //    webcam (browser prompt) or, on immersive-ar devices, enters XR, where
+    //    the device supplies the room view instead.
     this.cameraPassthrough = new CameraPassthrough();
-    void this.setupCameraAccess();
+    this.setupCameraAccess();
     this.bindXRSessionEvents();
 
     this.setupLightingAndTransparentCanvas();
@@ -214,49 +214,81 @@ class LotusSpatialApp extends xb.Script {
   }
 
   /**
-   * In an immersive-ar session (Meta Quest, Android XR…) the headset composites
-   * real-world passthrough itself, so release the getUserMedia stream and hide
-   * the onboarding card. When the session ends, fall back to the web camera.
+   * Always show the gate: before an XR session starts there is nothing behind
+   * the transparent canvas, so a headset/emulator would otherwise see a blank
+   * page. On immersive-ar devices the gate offers "Enter XR" as the main
+   * action; the webcam opens only after an explicit tap.
    */
-  private async setupCameraAccess() {
-    // Devices (or emulators) with immersive-ar get their camera view from the
-    // XR session, so the webcam is never opened and no gate is shown.
-    let xrArSupported = false;
-    try {
-      xrArSupported = Boolean(
-        await navigator.xr?.isSessionSupported('immersive-ar'),
-      );
-    } catch {
-      // WebXR unavailable.
-    }
-    if (xrArSupported) return;
-
-    // Otherwise the webcam opens only after an explicit tap on the gate.
+  private setupCameraAccess() {
     this.cameraGate = new CameraGate(
       async () => {
         const ok = await this.cameraPassthrough.startCamera('environment');
         this.webcamWanted = ok;
+        // The permission prompt can resolve after an XR session has started;
+        // the device owns the view then, so keep the webcam off until it ends.
+        if (ok && this.isXRPresenting()) {
+          this.cameraPassthrough.stopCamera();
+          this.cameraPassthrough.setVisible(false);
+        }
         return ok;
       },
       () => {},
     );
   }
 
+  /**
+   * In an immersive-ar session (Meta Quest, Android XR…) the device composites
+   * real-world passthrough itself, so release the getUserMedia stream and hide
+   * the onboarding card. When the session ends, fall back to the web camera,
+   * or to the card again if the webcam was never enabled.
+   */
   private bindXRSessionEvents() {
     const renderer = xb.core?.renderer as THREE.WebGLRenderer | undefined;
     const xrManager = renderer?.xr;
-    if (!xrManager) return;
-    xrManager.addEventListener('sessionstart', () => {
-      this.cameraGate?.hide();
+    if (!xrManager || !renderer) return;
+    // xrblocks resizes the renderer on every window resize, but the device owns
+    // the framebuffer size during a session and three.js ignores (and warns
+    // about) the call. Skip it while presenting and replay it afterwards.
+    const originalSetSize = renderer.setSize;
+    let resizeSkipped = false;
+    renderer.setSize = (width, height, updateStyle) => {
+      if (xrManager.isPresenting) {
+        resizeSkipped = true;
+        return;
+      }
+      originalSetSize.call(renderer, width, height, updateStyle);
+    };
+    const onSessionStart = () => {
+      // During XR the headset/emulator owns the canvas layout. Our full-screen
+      // `canvas.lotus-canvas` rules (fixed, z-index 5, !important) would sit on
+      // top of the emulator's toolbar, gizmos and controller panels and swallow
+      // every click, so drop them until the session ends.
+      renderer.domElement.classList.remove('lotus-canvas');
+      this.cameraGate?.onSessionStart();
       this.cameraPassthrough.stopCamera();
       this.cameraPassthrough.setVisible(false);
-    });
-    xrManager.addEventListener('sessionend', () => {
+    };
+    const onSessionEnd = () => {
+      renderer.domElement.classList.add('lotus-canvas');
+      this.cameraGate?.onSessionEnd(!this.webcamWanted);
       if (this.webcamWanted) {
         this.cameraPassthrough.setVisible(true);
         void this.cameraPassthrough.startCamera();
       }
-    });
+      if (resizeSkipped) {
+        resizeSkipped = false;
+        // Deferred so it runs after three.js restores its pre-session size;
+        // xrblocks' resize handler then applies the current window size.
+        setTimeout(() => window.dispatchEvent(new Event('resize')), 0);
+      }
+    };
+    xrManager.addEventListener('sessionstart', onSessionStart);
+    xrManager.addEventListener('sessionend', onSessionEnd);
+    this.unbindXRSession = () => {
+      xrManager.removeEventListener('sessionstart', onSessionStart);
+      xrManager.removeEventListener('sessionend', onSessionEnd);
+      renderer.setSize = originalSetSize;
+    };
   }
 
   /**
@@ -305,6 +337,8 @@ class LotusSpatialApp extends xb.Script {
       scene.background = null;
     }
     if (renderer) {
+      // Scope the canvas CSS to our own canvas so emulator canvases (IWER) keep their layout
+      renderer.domElement.classList.add('lotus-canvas');
       try {
         renderer.setClearColor(0x000000, 0);
         if (scene) {
@@ -464,7 +498,7 @@ class LotusSpatialApp extends xb.Script {
           this.pinManager.updatePreview(
             true,
             hit.point,
-            this.clock.getElapsedTime(),
+            xb.getElapsedTime(),
           );
           this.ui.setDraggingPinState(this.activeDragPinId, e.clientX, e.clientY);
         }
@@ -539,7 +573,7 @@ class LotusSpatialApp extends xb.Script {
         this.pinManager.updatePreview(
           true,
           hit.point,
-          this.clock.getElapsedTime(),
+          xb.getElapsedTime(),
         );
       }
     } else {
@@ -740,8 +774,8 @@ class LotusSpatialApp extends xb.Script {
   }
 
   update() {
-    const delta = Math.min(this.clock.getDelta(), 0.1);
-    const elapsed = this.clock.getElapsedTime();
+    const delta = Math.min(xb.getDeltaTime(), 0.1);
+    const elapsed = xb.getElapsedTime();
     const camera = xb.core?.camera;
     if (!camera) return;
 
@@ -831,7 +865,8 @@ class LotusSpatialApp extends xb.Script {
   }
 
   dispose() {
-    this.cameraGate?.hide();
+    this.unbindXRSession?.();
+    this.cameraGate?.dispose();
     this.cameraPassthrough?.stopCamera();
     this.roomBuilder?.dispose();
     this.pinManager?.dispose();
@@ -852,7 +887,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // options.enableSimulator = auto;
   // options.xrButton.alwaysAutostartSimulator = false;
   // options.xrButton.showEnterSimulatorButton = false;
-  options.enableCamera('environment');
+  // No options.enableCamera(): LOTUS opens the webcam itself (CameraPassthrough),
+  // and xrblocks' own camera only adds a second permission request plus a
+  // "Raw Camera Access not available" warning on devices/emulators without it.
   options.enableDepth();
   options.reticles.enabled = false;
 

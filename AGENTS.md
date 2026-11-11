@@ -10,15 +10,16 @@
 
 - Package manager is **bun** — only `bun.lock` is committed, no `package-lock.json`. Use `bun install`, `bun run <script>`.
 - `bun run dev` — Vite dev server on `0.0.0.0:3000` (host bind is intentional for LAN device testing).
-- `bun run lint` — the ONLY quality gate, and despite the name it is `tsc --noEmit` (typecheck). There is no ESLint, no test suite, no CI. Run it after every change.
+- `bun run lint` — the ONLY quality gate, and despite the name it is `tsc --noEmit` (typecheck). There is no ESLint and no test suite; the GitHub Pages deploy workflow runs this typecheck before building. Run it after every change.
 - `bun run build` → `dist/`; `bun run preview` serves the build.
-- No env vars or API keys anywhere (nothing reads `process.env`/`import.meta.env`; no `vite.config.ts`).
+- No env vars or API keys anywhere (nothing reads `process.env`/`import.meta.env`). `vite.config.ts` only sets a relative `base` (GitHub Pages sub-path) and dedupes `three`.
 
 ## Architecture / wiring
 
-- Entry: `index.html` → `src/index.ts`. On `DOMContentLoaded` it builds `xb.Options()` (title, camera `environment`, depth enabled, reticles disabled), then `xb.add(new LotusSpatialApp())` + `xb.init(options)`. There is no router; one screen.
+- Entry: `index.html` → `src/index.ts`. On `DOMContentLoaded` it builds `xb.Options()` (title, depth enabled, reticles disabled; no `enableCamera()` — LOTUS opens the webcam itself), then `xb.add(new LotusSpatialApp())` + `xb.init(options)`. There is no router; one screen.
 - xrblocks lifecycle: feature modules extend `xb.Script`, override `init()`/`dispose()`, and attach roots via `this.add(...)` (see `LotusSpatialApp` in `src/index.ts`). Camera access goes through `xb.core?.camera`.
 - **AR passthrough is NOT the WebXR camera API**: `src/CameraPassthrough.ts` gets a `getUserMedia` stream and renders a `<video>` element behind a transparent three.js canvas. Rear camera (`facingMode: 'environment'` ideal) with fallback to any webcam (desktop).
+- `src/CameraGate.ts` is the onboarding card and the ONLY way into XR: xrblocks' own Enter XR button is hidden by CSS (`#XRButtonWrapper`) and the gate forwards taps to it. The gate is hidden/re-shown, never destroyed, and leaves an "Enter XR" chip when dismissed on immersive-ar devices. During a session the webcam stream is stopped (`bindXRSessionEvents` in `src/index.ts`).
 - Persistence is 100% `localStorage` (`src/storage.ts`: pins, tasks, focus zone, settings). Data shapes live in `src/types.ts` and must stay JSON-serializable. Changing a schema requires a migration in `storage.ts` loaders, not just type edits.
 - UI (`src/LotusUI.ts`) is a DOM overlay using d3, not lit or @pmndrs/uikit. Voice dictation uses the Web Speech API directly and degrades gracefully when unsupported.
 - Sound is a zero-dependency WebAudio synth (`src/sound.ts`); all playback wrapped in try/catch for autoplay policy.
