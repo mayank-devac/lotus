@@ -8,12 +8,10 @@ import {
 
 const _corner = new THREE.Vector3();
 
-const DOF_VERTEX_SHADER = /* glsl */ `
+const DIM_VERTEX_SHADER = /* glsl */ `
   varying vec3 vWorldPosition;
-  varying vec2 vUv;
 
   void main() {
-    vUv = uv;
     vec4 worldPosition = modelMatrix * vec4(position, 1.0);
     vWorldPosition = worldPosition.xyz;
     gl_Position = projectionMatrix * viewMatrix * worldPosition;
@@ -21,49 +19,41 @@ const DOF_VERTEX_SHADER = /* glsl */ `
 `;
 
 /**
- * Custom GLSL Depth-of-Field Fragment Shader:
- * Dynamically computes normalized 3D distance from the center of the selected focus area
- * (uFocusCenter, uFocusHalfExtents) and smoothly increases optical blur / depth-of-field
- * attenuation the further an object or surface is from the center of the focus zone.
+ * Peripheral dim for immersive AR. WebXR gives no access to the passthrough
+ * pixels, so the real room cannot be blurred; instead a shell around the head
+ * darkens everything except the directions that look at the focus zone.
+ * For each fragment the view ray is taken into focus-zone space and its closest
+ * approach to the zone centre (normalised by the zone's half extents) decides
+ * how much dim to apply: clear through the zone, ramping up around it.
  */
-const DOF_FRAGMENT_SHADER = /* glsl */ `
+const DIM_FRAGMENT_SHADER = /* glsl */ `
   uniform vec3 uFocusCenter;
   uniform vec3 uFocusHalfExtents;
   uniform vec3 uTintColor;
   uniform float uBaseOpacity;
-  uniform float uTime;
+  uniform mat4 uZoneFromWorld;
 
   varying vec3 vWorldPosition;
-  varying vec2 vUv;
 
   void main() {
-    // Compute normalized distance from the exact 3D center of the selected focus area
+    vec3 rayOrigin = (uZoneFromWorld * vec4(cameraPosition, 1.0)).xyz;
+    vec3 fragPos = (uZoneFromWorld * vec4(vWorldPosition, 1.0)).xyz;
+    vec3 rayDir = normalize(fragPos - rayOrigin);
+
     vec3 safeExtents = max(uFocusHalfExtents, vec3(0.18));
-    vec3 delta = (vWorldPosition - uFocusCenter) / safeExtents;
-    float distFromFocusCenter = length(delta);
+    float along = max(dot(uFocusCenter - rayOrigin, rayDir), 0.0);
+    vec3 miss = (rayOrigin + rayDir * along - uFocusCenter) / safeExtents;
+    float dim = smoothstep(1.0, 2.4, length(miss));
 
-    // Inside the core of the focus zone (dist < 0.65), keep completely clear (0.0).
-    // As distance from the focus center increases (0.65 -> 3.2), smoothly ramp up
-    // the depth-of-field blur veil and bokeh falloff.
-    float innerEdge = smoothstep(0.62, 1.15, distFromFocusCenter);
-    float outerFalloff = smoothstep(1.0, 3.2, distFromFocusCenter);
-
-    // Subtle procedural bokeh-like spatial softness modulation with distance
-    float bokehWave = 0.96 + 0.04 * sin(vWorldPosition.x * 8.0 + uTime * 0.8) * cos(vWorldPosition.y * 8.0);
-    float dofStrength = clamp(innerEdge * 0.55 + outerFalloff * 0.45, 0.0, 1.0) * bokehWave;
-
-    float alpha = uBaseOpacity * dofStrength;
-    vec3 finalColor = mix(uTintColor * 1.18, uTintColor * 0.72, outerFalloff);
-
-    gl_FragColor = vec4(finalColor, alpha);
+    gl_FragColor = vec4(uTintColor, uBaseOpacity * dim);
   }
 `;
 
 /**
- * Manages the 3D drag-to-select Focus Zone bounding volume, corner pillars,
- * 3D GLSL Depth-of-Field shader shroud (which dynamically increases blurriness/attenuation
- * with distance from the center of the selected focus area), and real-time 3D-to-screen
- * bounding box projection for the optical depth-of-field aperture.
+ * Manages the 3D drag-to-select Focus Zone bounding volume, its wireframe
+ * frame (shown in immersive sessions), the peripheral dim shell that stands in
+ * for the 2D blur shield inside a headset, and real-time 3D-to-screen bounding
+ * box projection for the 2D optical aperture.
  */
 export class FocusVolume3D {
   public readonly root = new THREE.Group();
@@ -71,9 +61,10 @@ export class FocusVolume3D {
   private volumeFillMesh: THREE.Mesh;
   private basePadMesh: THREE.Mesh;
   private cornerPillars: THREE.Mesh[] = [];
-  private shroudGroup = new THREE.Group();
-  private shroudMeshes: THREE.Mesh[] = [];
+  private dimDome: THREE.Mesh;
   private dofShaderMat: THREE.ShaderMaterial;
+  private xrPresenting = false;
+  private xrDimActive = false;
   private focusSpotlight: THREE.SpotLight;
 
   private geometries: THREE.BufferGeometry[] = [];
@@ -108,7 +99,7 @@ export class FocusVolume3D {
     const edgesGeo = this.trackGeo(new THREE.EdgesGeometry(boxGeo));
     const lineMat = this.trackMat(
       new THREE.LineBasicMaterial({
-        color: 0x1b1b19,
+        color: 0xe84d2b,
         transparent: true,
         opacity: 0.9,
       }),
@@ -148,7 +139,7 @@ export class FocusVolume3D {
       this.root.add(pillar);
     }
 
-    // 5. 3D Depth-of-Field Shader Shroud (dynamically increases blurriness with distance from focus center)
+    // 5. Peripheral dim shell for immersive AR (see DIM_FRAGMENT_SHADER)
     this.dofShaderMat = this.trackMat(
       new THREE.ShaderMaterial({
         uniforms: {
@@ -156,24 +147,22 @@ export class FocusVolume3D {
           uFocusHalfExtents: {value: new THREE.Vector3(0.65, 0.4, 0.35)},
           uTintColor: {value: new THREE.Color(0x0b111e)},
           uBaseOpacity: {value: 0.0},
-          uTime: {value: 0.0},
+          uZoneFromWorld: {value: new THREE.Matrix4()},
         },
-        vertexShader: DOF_VERTEX_SHADER,
-        fragmentShader: DOF_FRAGMENT_SHADER,
+        vertexShader: DIM_VERTEX_SHADER,
+        fragmentShader: DIM_FRAGMENT_SHADER,
         transparent: true,
         depthWrite: false,
-        side: THREE.DoubleSide,
+        side: THREE.BackSide,
       }),
     );
-
-    const wallGeo = this.trackGeo(new THREE.BoxGeometry(1, 1, 1, 8, 8, 8));
-    for (let i = 0; i < 4; i++) {
-      const m = new THREE.Mesh(wallGeo, this.dofShaderMat);
-      m.visible = false;
-      this.shroudMeshes.push(m);
-      this.shroudGroup.add(m);
-    }
-    this.root.add(this.shroudGroup);
+    const domeGeo = this.trackGeo(new THREE.SphereGeometry(4, 32, 20));
+    this.dimDome = new THREE.Mesh(domeGeo, this.dofShaderMat);
+    this.dimDome.visible = false;
+    this.dimDome.frustumCulled = false;
+    // Drawn before other transparent content so panels and labels stay bright.
+    this.dimDome.renderOrder = -1;
+    this.root.add(this.dimDome);
 
     // 6. Dedicated Warm Study Spotlight focused on the active zone
     this.focusSpotlight = new THREE.SpotLight(
@@ -257,8 +246,40 @@ export class FocusVolume3D {
     return this.dofShaderMat.uniforms.uFocusHalfExtents.value;
   }
 
-  public updateShaderTime(elapsed: number) {
-    this.dofShaderMat.uniforms.uTime.value = elapsed;
+  /**
+   * In an immersive session the 2D selection outline is not visible, so the
+   * zone is shown with its 3D frame instead.
+   */
+  public setXRPresentation(presenting: boolean) {
+    this.xrPresenting = presenting;
+    if (!presenting) this.setXRDim(false, 0, this.shieldStyle);
+    this.applyBoundsGeometry(this.currentBounds, false);
+  }
+
+  /** Turns the peripheral dim shell on or off (immersive sessions only). */
+  public setXRDim(active: boolean, strength: number, shieldStyle: ShieldStyle) {
+    this.xrDimActive = active && this.currentBounds.defined;
+    this.dimDome.visible = this.xrDimActive;
+    const uniforms = this.dofShaderMat.uniforms;
+    uniforms.uBaseOpacity.value = THREE.MathUtils.clamp(strength, 0, 1) * 0.92;
+    const tint =
+      shieldStyle === 'dark'
+        ? 0x000000
+        : shieldStyle === 'ambient'
+          ? 0x1a1206
+          : 0x0b111e;
+    (uniforms.uTintColor.value as THREE.Color).setHex(tint);
+  }
+
+  /** Keeps the dim shell centred on the viewer. Call once per frame. */
+  public updateDim(cameraWorldPosition: THREE.Vector3) {
+    if (!this.xrDimActive) return;
+    this.root.updateWorldMatrix(true, false);
+    (this.dofShaderMat.uniforms.uZoneFromWorld.value as THREE.Matrix4)
+      .copy(this.root.matrixWorld)
+      .invert();
+    this.dimDome.position.copy(cameraWorldPosition);
+    this.root.worldToLocal(this.dimDome.position);
   }
 
   public setFocusTimerState(
@@ -280,7 +301,7 @@ export class FocusVolume3D {
       this.wireframeBox.visible = false;
       this.basePadMesh.visible = false;
       this.cornerPillars.forEach((p) => (p.visible = false));
-      this.shroudMeshes.forEach((m) => (m.visible = false));
+      this.dimDome.visible = false;
       this.focusSpotlight.intensity = 0;
       return;
     }
@@ -300,16 +321,24 @@ export class FocusVolume3D {
       sz * 0.5,
     );
 
-    // Keep 3D wireframe box, orange pillars, and floor pad hidden so the UI uses only the clean 2D selection outline
+    // On a 2D screen the UI draws its own clean selection outline, so the 3D
+    // frame stays hidden there. In a headset that outline does not exist, so
+    // the wireframe box and base pad show the zone while it is being set.
+    const show3DFrame = this.xrPresenting && showFrame;
+    this.wireframeBox.visible = show3DFrame;
+    this.basePadMesh.visible = show3DFrame;
     this.volumeFillMesh.visible = false;
-    this.wireframeBox.visible = false;
-    this.basePadMesh.visible = false;
     this.cornerPillars.forEach((pillar) => {
       pillar.visible = false;
     });
+    if (show3DFrame) {
+      this.wireframeBox.position.set(cx, cy, cz);
+      this.wireframeBox.scale.set(sx, sy, sz);
+      this.basePadMesh.position.set(cx, bounds.min.y + 0.005, cz);
+      this.basePadMesh.scale.set(sx, 1, sz);
+    }
 
-    // Configure warm focus spotlight when timer is active; optical shield is handled seamlessly by #lotus-surround-shield
-    this.shroudMeshes.forEach((m) => (m.visible = false));
+    // Warm focus spotlight when the timer is active (virtual room only).
     if (this.isTimerRunning) {
       this.focusSpotlight.position.set(cx, bounds.max.y + 1.15, cz + 0.25);
       this.focusSpotlight.target.position.set(cx, bounds.min.y, cz);

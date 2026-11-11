@@ -3727,6 +3727,25 @@ export class LotusUI {
       });
   }
 
+  /**
+   * Closes every modal. Used when an immersive session starts: the DOM is not
+   * visible in a headset, so an open modal could never be dismissed there.
+   */
+  public closeAllModals() {
+    if (!this.isAnyModalOpen()) return;
+    this.isTasksOpen = false;
+    this.isWelcomeOpen = false;
+    this.isComposerOpen = false;
+    this.isPinDirectoryOpen = false;
+    this.inspectedPinId = null;
+    this.renderAllPanels();
+  }
+
+  /** Current focus timer readout for the in-headset panel. */
+  public getTimerClockText(): string {
+    return this.formatClockDisplay() || '00:00';
+  }
+
   public isAnyModalOpen(): boolean {
     return (
       this.isTasksOpen ||

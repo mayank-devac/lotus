@@ -12,6 +12,8 @@ const _camWorldPos = new THREE.Vector3();
 const _pinCenterPos = new THREE.Vector3();
 const _projectedPos = new THREE.Vector3();
 const _camLocalPos = new THREE.Vector3();
+const _billboardQuat = new THREE.Quaternion();
+const _camWorldQuat = new THREE.Quaternion();
 
 interface PinNode {
   pin: SpatialPin;
@@ -164,9 +166,9 @@ export class PinManager3D {
     const group = new THREE.Group();
     group.name = `LotusPin_${pin.id}`;
     group.position.set(pin.position.x, pin.position.y, pin.position.z);
-    (group as unknown as {xb?: {manipulation: boolean}}).xb = {
-      manipulation: true,
-    };
+    // No xrblocks manipulation here: the app moves pins itself (mouse/touch
+    // drag on screens, ray drag in a headset). Two systems writing the pin
+    // position in the same frame fought each other.
 
     const accentColor = new THREE.Color(pin.color || '#E84D2B');
 
@@ -284,6 +286,14 @@ export class PinManager3D {
     return list;
   }
 
+  /** World-space centre of a pin (the root may be moved by the room anchor). */
+  public getPinWorldPosition(pinId: string, target: THREE.Vector3): boolean {
+    const node = this.pinNodes.get(pinId);
+    if (!node) return false;
+    node.group.getWorldPosition(target);
+    return true;
+  }
+
   public setHoveredPin(pinId: string | null) {
     for (const [id, node] of this.pinNodes.entries()) {
       const nextHovered = id === pinId;
@@ -358,12 +368,20 @@ export class PinManager3D {
     camera.getWorldPosition(_camWorldPos);
     const projections: PinScreenProjection[] = [];
 
+    // The pins root can be rotated by the room anchor, so billboards need the
+    // camera orientation expressed in the root's space.
+    this.root.updateWorldMatrix(true, false);
+    this.root.getWorldQuaternion(_billboardQuat).invert();
+    camera.getWorldQuaternion(_camWorldQuat);
+    _billboardQuat.multiply(_camWorldQuat);
+
     for (const node of this.pinNodes.values()) {
       const effectiveStyle = node.pin.shapeStyle ?? defaultPinStyle;
       node.revolvingGroup.visible = effectiveStyle === 'revolving';
       node.dotMesh.visible = effectiveStyle === 'dot';
 
-      const dist = _camWorldPos.distanceTo(node.group.position);
+      _pinCenterPos.copy(node.group.position).applyMatrix4(this.root.matrixWorld);
+      const dist = _camWorldPos.distanceTo(_pinCenterPos);
       const withinRadius = dist <= proximityDistanceMeters;
 
       let shouldShowHeader = false;
@@ -431,13 +449,13 @@ export class PinManager3D {
         activeEmissive + 0.15;
 
       // 2. Hover Halo Ring (Billboards toward camera, visible ONLY when hovered)
-      node.hoverRingMesh.quaternion.copy(camera.quaternion);
+      node.hoverRingMesh.quaternion.copy(_billboardQuat);
       node.hoverRingMesh.scale.setScalar(0.85 + node.hoverLerp * 0.45);
       (node.hoverRingMesh.material as THREE.MeshBasicMaterial).opacity =
         node.hoverLerp * 0.85;
 
       // 3. Click Shockwave Ripple Ring (Billboards toward camera, bursts on click)
-      node.clickRippleMesh.quaternion.copy(camera.quaternion);
+      node.clickRippleMesh.quaternion.copy(_billboardQuat);
       if (node.clickPulse > 0) {
         const progress = 1.0 - node.clickPulse;
         node.clickRippleMesh.scale.setScalar(1.0 + progress * 2.4);
@@ -448,7 +466,6 @@ export class PinManager3D {
       }
 
       // 4. Project exact 3D point center to 2D viewport coordinates and camera-local space
-      _pinCenterPos.copy(node.group.position);
       _camLocalPos.copy(_pinCenterPos).applyMatrix4(camera.matrixWorldInverse);
       _projectedPos.copy(_pinCenterPos).project(camera);
 

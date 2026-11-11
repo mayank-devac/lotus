@@ -94,6 +94,22 @@ export class CameraGate {
       this.xrBtn.hidden = false;
       // Enter XR becomes the main action; the webcam is the fallback.
       this.enableBtn.classList.add('is-fallback');
+      // A standalone headset has no useful webcam view: the browser camera is
+      // not the room. Offer only Enter XR there.
+      if (/OculusBrowser|Quest/i.test(navigator.userAgent)) {
+        this.enableBtn.hidden = true;
+        const copyEl = this.el.querySelector<HTMLElement>(
+          '.lotus-camera-gate-copy',
+        );
+        if (copyEl) copyEl.hidden = true;
+        this.headsetEl.innerHTML =
+          'Tap <strong>Enter XR</strong> to see your room through the headset. ' +
+          'Memory pins stay attached to real walls, desks and objects.';
+        const skipBtn = this.el.querySelector<HTMLButtonElement>(
+          '.lotus-camera-gate-secondary',
+        );
+        if (skipBtn) skipBtn.textContent = 'Not now';
+      }
       this.syncVisibility(this.el.isConnected);
     } catch {
       // WebXR unavailable — nothing to offer.

@@ -77,6 +77,13 @@ button {
   display: none !important;
 }
 
+/* During an XR session an emulator shows the scene in its own full-page layer,
+   which would otherwise cover the DOM UI (root z-index 30). The root itself
+   ignores pointer events, so emulator controls stay clickable around the UI. */
+body.lotus-xr-active #lotus-ui-root {
+  z-index: 2147483000;
+}
+
 /* ============================================================================
    LOTUS UI ROOT LAYER
    ============================================================================ */

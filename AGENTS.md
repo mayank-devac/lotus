@@ -22,6 +22,9 @@
 - `src/CameraGate.ts` is the onboarding card and the ONLY way into XR: xrblocks' own Enter XR button is hidden by CSS (`#XRButtonWrapper`) and the gate forwards taps to it. The gate is hidden/re-shown, never destroyed, and leaves an "Enter XR" chip when dismissed on immersive-ar devices. During a session the webcam stream is stopped (`bindXRSessionEvents` in `src/index.ts`).
 - Persistence is 100% `localStorage` (`src/storage.ts`: pins, tasks, focus zone, settings). Data shapes live in `src/types.ts` and must stay JSON-serializable. Changing a schema requires a migration in `storage.ts` loaders, not just type edits.
 - UI (`src/LotusUI.ts`) is a DOM overlay using d3, not lit or @pmndrs/uikit. Voice dictation uses the Web Speech API directly and degrades gracefully when unsupported.
+- **The DOM UI is invisible inside an immersive session on a headset.** `src/XRInterface.ts` is the in-headset UI (canvas-textured control panel, pin card, pin labels, aiming rays); `index.ts` ray-tests it itself from the controller/hand pose in `onSelectStart`/`onSelecting`/`onSelectEnd`, which are XR-only. Any feature the user needs in the headset must be reachable from there, not only from `LotusUI`.
+- Pins and the focus zone are stored in "room space": they hang under `worldRoot` in `index.ts`, which `src/RoomAnchor.ts` moves each frame from one persistent WebXR anchor. Convert ray hits with `worldRoot.worldToLocal` before storing (`raycastSpatialPoint` already does) and use world positions for distances.
+- The focus shield in a headset is the dim shell in `src/FocusVolume3D.ts` (passthrough cannot be blurred in WebXR); the CSS `backdrop-filter` shield is 2D-only.
 - Sound is a zero-dependency WebAudio synth (`src/sound.ts`); all playback wrapped in try/catch for autoplay policy.
 
 ## Gotchas
