@@ -29,9 +29,10 @@ const DIM_VERTEX_SHADER = /* glsl */ `
  * Peripheral dim for immersive AR. WebXR gives no access to the passthrough
  * pixels, so the real room cannot be blurred; instead a shell around the head
  * darkens everything except the directions that look at the focus zone.
- * For each fragment the view ray is taken into focus-zone space and its closest
- * approach to the zone centre (normalised by the zone's half extents) decides
- * how much dim to apply: clear through the zone, ramping up around it.
+ * Each fragment's view ray is measured against the focus box in zone space:
+ * the smallest box distance along the ray decides the dim, so rays through the
+ * zone stay clear and the shadow fades out smoothly around the rectangle the
+ * user dragged — no hard border, no rounded-off edges.
  */
 const DIM_FRAGMENT_SHADER = /* glsl */ `
   uniform vec3 uFocusCenter;
@@ -42,15 +43,57 @@ const DIM_FRAGMENT_SHADER = /* glsl */ `
 
   varying vec3 vWorldPosition;
 
+  /** Chebyshev distance of a point from the zone box (normalised). */
+  float boxDistanceAt(vec3 p, vec3 extents) {
+    vec3 o = (p - uFocusCenter) / extents;
+    return max(abs(o.x), max(abs(o.y), abs(o.z)));
+  }
+
+  /**
+   * Smallest box distance along the ray. That function is convex in t, so a
+   * short shrinking-step descent from the point closest to the centre finds
+   * the global minimum — exact enough for grazing rays too, which is what
+   * keeps the window's corners from rounding off.
+   */
+  float rayBoxDistance(vec3 rayOrigin, vec3 rayDir) {
+    vec3 extents = max(uFocusHalfExtents, vec3(0.18));
+    float slope = max(
+      max(abs(rayDir.x) / extents.x, abs(rayDir.y) / extents.y),
+      abs(rayDir.z) / extents.z
+    );
+    float t = dot(uFocusCenter - rayOrigin, rayDir);
+    float s = 1.0 / max(slope, 1e-4);
+    float d = boxDistanceAt(rayOrigin + rayDir * t, extents);
+    for (int i = 0; i < 10; i++) {
+      float dLeft = boxDistanceAt(rayOrigin + rayDir * (t - s), extents);
+      if (dLeft < d) {
+        d = dLeft;
+        t -= s;
+      }
+      float dRight = boxDistanceAt(rayOrigin + rayDir * (t + s), extents);
+      if (dRight < d) {
+        d = dRight;
+        t += s;
+      }
+      s *= 0.6;
+    }
+    return d;
+  }
+
   void main() {
     vec3 rayOrigin = (uZoneFromWorld * vec4(cameraPosition, 1.0)).xyz;
     vec3 fragPos = (uZoneFromWorld * vec4(vWorldPosition, 1.0)).xyz;
     vec3 rayDir = normalize(fragPos - rayOrigin);
 
-    vec3 safeExtents = max(uFocusHalfExtents, vec3(0.18));
-    float along = max(dot(uFocusCenter - rayOrigin, rayDir), 0.0);
-    vec3 miss = (rayOrigin + rayDir * along - uFocusCenter) / safeExtents;
-    float dim = smoothstep(1.0, 2.4, length(miss));
+    // 0 dim through the zone, fading to full one fade width outside its
+    // faces. Measuring the whole ray (not a single sample point) keeps the
+    // fade hugging the dragged rectangle from every viewing angle.
+    float fadeWidth = 0.35;
+    float dim = smoothstep(
+      1.0,
+      1.0 + fadeWidth,
+      rayBoxDistance(rayOrigin, rayDir)
+    );
 
     gl_FragColor = vec4(uTintColor, uBaseOpacity * dim);
   }
@@ -60,6 +103,13 @@ const DIM_FRAGMENT_SHADER = /* glsl */ `
 const MIN_ZONE_SIZE = 0.35;
 /** A zone dragged out on a surface reaches this far (m) above it. */
 const SURFACE_ZONE_HEIGHT = 0.72;
+/**
+ * When a focus-drag ray hits no surface (beyond the depth mesh or the virtual
+ * room), the dragged corner lands this far along the ray. The short pin-place
+ * fallback would snap the corner back toward the user, so aiming far stopped
+ * extending the area.
+ */
+export const FOCUS_RAY_FALLBACK_METERS = 8;
 
 /**
  * The focus zone spanned by two dragged corners, in the space the corners are
@@ -103,9 +153,7 @@ export function focusZoneFromDrag(
 export class FocusVolume3D {
   public readonly root = new THREE.Group();
   private wireframeBox: THREE.LineSegments;
-  private volumeFillMesh: THREE.Mesh;
   private basePadMesh: THREE.Mesh;
-  private cornerPillars: THREE.Mesh[] = [];
   private dimDome: THREE.Mesh;
   private dimMaterial: THREE.ShaderMaterial;
   private xrPresenting = false;
@@ -126,19 +174,8 @@ export class FocusVolume3D {
       pointerEvents: 'none',
     };
 
-    // 1. Translucent volume enclosure
+    // 1. Unit box, shared by the wireframe border and (scaled) by the frame.
     const boxGeo = this.trackGeo(new THREE.BoxGeometry(1, 1, 1));
-    const fillMat = this.trackMat(
-      new THREE.MeshBasicMaterial({
-        color: 0xe84d2b,
-        transparent: true,
-        opacity: 0.04,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-      }),
-    );
-    this.volumeFillMesh = new THREE.Mesh(boxGeo, fillMat);
-    this.root.add(this.volumeFillMesh);
 
     // 2. Crisp architectural wireframe border
     const edgesGeo = this.trackGeo(new THREE.EdgesGeometry(boxGeo));
@@ -167,24 +204,7 @@ export class FocusVolume3D {
     this.basePadMesh = new THREE.Mesh(padGeo, padMat);
     this.root.add(this.basePadMesh);
 
-    // 4. Four corner pillar markers
-    const pillarGeo = this.trackGeo(
-      new THREE.CylinderGeometry(0.012, 0.012, 1, 12),
-    );
-    const pillarMat = this.trackMat(
-      new THREE.MeshBasicMaterial({
-        color: 0xe84d2b,
-        transparent: true,
-        opacity: 0.92,
-      }),
-    );
-    for (let i = 0; i < 4; i++) {
-      const pillar = new THREE.Mesh(pillarGeo, pillarMat);
-      this.cornerPillars.push(pillar);
-      this.root.add(pillar);
-    }
-
-    // 5. Peripheral dim shell for immersive AR (see DIM_FRAGMENT_SHADER)
+    // 4. Peripheral dim shell for immersive AR (see DIM_FRAGMENT_SHADER)
     this.dimMaterial = this.trackMat(
       new THREE.ShaderMaterial({
         uniforms: {
@@ -209,7 +229,7 @@ export class FocusVolume3D {
     this.dimDome.renderOrder = -1;
     this.root.add(this.dimDome);
 
-    // 6. Dedicated Warm Study Spotlight focused on the active zone
+    // 5. Dedicated Warm Study Spotlight focused on the active zone
     this.focusSpotlight = new THREE.SpotLight(
       0xfffbeb,
       0,
@@ -256,14 +276,6 @@ export class FocusVolume3D {
 
   public getBounds(): FocusZoneBounds {
     return this.currentBounds;
-  }
-
-  public getFocusCenter3D(): THREE.Vector3 {
-    return this.dimMaterial.uniforms.uFocusCenter.value;
-  }
-
-  public getFocusHalfExtents3D(): THREE.Vector3 {
-    return this.dimMaterial.uniforms.uFocusHalfExtents.value;
   }
 
   /**
@@ -320,10 +332,8 @@ export class FocusVolume3D {
   private applyBoundsGeometry(bounds: FocusZoneBounds, showFrame: boolean) {
     this.syncDimVisibility();
     if (!bounds.defined) {
-      this.volumeFillMesh.visible = false;
       this.wireframeBox.visible = false;
       this.basePadMesh.visible = false;
-      this.cornerPillars.forEach((p) => (p.visible = false));
       this.focusSpotlight.intensity = 0;
       return;
     }
@@ -349,10 +359,6 @@ export class FocusVolume3D {
     const show3DFrame = this.xrPresenting && showFrame;
     this.wireframeBox.visible = show3DFrame;
     this.basePadMesh.visible = show3DFrame;
-    this.volumeFillMesh.visible = false;
-    this.cornerPillars.forEach((pillar) => {
-      pillar.visible = false;
-    });
     if (show3DFrame) {
       this.wireframeBox.position.set(cx, cy, cz);
       this.wireframeBox.scale.set(sx, sy, sz);

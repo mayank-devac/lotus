@@ -1,7 +1,11 @@
 import * as THREE from 'three';
 import * as xb from 'xrblocks';
 
-import {FocusVolume3D, focusZoneFromDrag} from './FocusVolume3D';
+import {
+  FocusVolume3D,
+  focusZoneFromDrag,
+  FOCUS_RAY_FALLBACK_METERS,
+} from './FocusVolume3D';
 import {LotusUI, PIN_COLOR_OPTIONS} from './LotusUI';
 import {PinManager3D} from './PinManager3D';
 import {RoomAnchor} from './RoomAnchor';
@@ -984,7 +988,15 @@ export class ImmersiveSession {
   private startFocusDrag(controller: xb.Controller, hit: SpatialHit) {
     const {origin, direction} = this.raycaster.ray;
     const ray = this.roomRay();
-    const start = new THREE.Vector3(hit.point.x, hit.point.y, hit.point.z);
+    // Real surface: keep the hit. Otherwise extend the room-space ray: a far
+    // aim must start the corner out along the ray, not at the short pick
+    // fallback, and the cast already proved nothing blocks it.
+    const start = new THREE.Vector3();
+    if (hit.isSurface) {
+      start.set(hit.point.x, hit.point.y, hit.point.z);
+    } else {
+      ray.at(FOCUS_RAY_FALLBACK_METERS, start);
+    }
     const onSurface = ray.direction.y < FOCUS_SURFACE_PITCH;
     const normal = new THREE.Vector3(0, 1, 0);
     if (!onSurface) {

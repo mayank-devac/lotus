@@ -4,7 +4,7 @@ import * as xb from 'xrblocks';
 
 import {CameraGate} from './CameraGate';
 import {CameraPassthrough} from './CameraPassthrough';
-import {FocusVolume3D} from './FocusVolume3D';
+import {FocusVolume3D, FOCUS_RAY_FALLBACK_METERS} from './FocusVolume3D';
 import {LotusUI} from './LotusUI';
 import {ImmersiveSession} from './ImmersiveSession';
 import {PinManager3D} from './PinManager3D';
@@ -324,6 +324,10 @@ class LotusSpatialApp extends xb.Script {
       renderer.domElement.classList.add('lotus-canvas');
       document.body.classList.remove('lotus-xr-active');
       this.immersive.end();
+      // The 2D layer is coming back. Whatever a phantom input opened while
+      // the DOM was hidden (session events can leak in emulators) must not
+      // greet the user; the same reset runs on session start.
+      this.ui.closeAllModals();
       // Leaving XR is deliberate: don't re-show the onboarding card, just the
       // "Enter XR" chip so the user can go back in.
       this.cameraGate?.onSessionEnd(false);
@@ -555,6 +559,10 @@ class LotusSpatialApp extends xb.Script {
   }
 
   private handlePointerMove(e: PointerEvent) {
+    // An immersive session owns all input. Emulators (IWE) keep firing page
+    // pointer events while XR runs, and those must not drive the hidden 2D UI
+    // (e.g. raycast hovers or a phantom pin drag behind the session).
+    if (this.isXRPresenting()) return;
     if (this.ui.isAnyModalOpen()) {
       this.pinManager.updatePreview(false);
       return;
@@ -599,7 +607,7 @@ class LotusSpatialApp extends xb.Script {
         e.clientX - this.dragStartScreen.x,
         e.clientY - this.dragStartScreen.y,
       );
-      if (dragDist >= 8) {
+      if (dragDist >= 8 && this.dragStart3D) {
         this.ui.updateDragBox2D(
           true,
           this.dragStartScreen.x,
@@ -607,16 +615,14 @@ class LotusSpatialApp extends xb.Script {
           e.clientX,
           e.clientY,
         );
-        if (this.dragStart3D) {
-          const hit = this.raycastSpatialPoint();
-          if (hit) {
-            this.focusZone = this.focusVolume.setBoundsFromDrag(
-              this.dragStart3D,
-              hit.point,
-              'Focus Area',
-            );
-          }
-        }
+        this.focusZone = this.focusVolume.setBoundsFromDrag(
+          this.dragStart3D,
+          this.raycastSpatialPoint(
+            this.raycaster,
+            FOCUS_RAY_FALLBACK_METERS,
+          ).point,
+          'Focus Area',
+        );
       }
       return;
     }
@@ -670,6 +676,10 @@ class LotusSpatialApp extends xb.Script {
   }
 
   private handlePointerDown(e: PointerEvent) {
+    // See handlePointerMove: DOM input is inert during a session. A stray
+    // click in pin-add mode would otherwise open the composer invisibly, and
+    // it would greet the user when the 2D layer returns after the session.
+    if (this.isXRPresenting()) return;
     if (e.button !== 0) return;
     if (this.ui.isAnyModalOpen() || this.isEventOnUI(e)) return;
     if (!this.updateRaycasterFromPointer(e)) return;
@@ -680,8 +690,10 @@ class LotusSpatialApp extends xb.Script {
     if (this.mode === 'focus-drag') {
       this.isDraggingFocus = true;
       this.dragStartScreen = {x: e.clientX, y: e.clientY};
-      const hit = this.raycastSpatialPoint();
-      this.dragStart3D = hit ? hit.point : null;
+      this.dragStart3D = this.raycastSpatialPoint(
+        this.raycaster,
+        FOCUS_RAY_FALLBACK_METERS,
+      ).point;
       return;
     }
 
@@ -741,6 +753,8 @@ class LotusSpatialApp extends xb.Script {
   }
 
   private handlePointerUp(e: PointerEvent) {
+    // See handlePointerMove: DOM input is inert during a session.
+    if (this.isXRPresenting()) return;
     if (this.activeDragPinId) {
       const draggedId = this.activeDragPinId;
       const wasDragged = this.hasMovedDuringPinDrag;

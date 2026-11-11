@@ -2011,6 +2011,24 @@ export class LotusUI {
       this.draftBody = bodyInput.value;
     });
 
+    // Clicking into a field must retarget the XR keyboard (and its highlight)
+    // to that field; otherwise every key press types into the previously
+    // targeted field (Header by default). Classes are updated in place so the
+    // caret and focus are not destroyed by a re-render.
+    const attachKeyboardTargetFocus = (
+      input: HTMLInputElement | HTMLTextAreaElement | null,
+      field: 'title' | 'body' | 'surface',
+    ) => {
+      input?.addEventListener('focus', () => {
+        if (this.activeKeyboardField === field) return;
+        this.activeKeyboardField = field;
+        this.syncXrKeyboardTargetClasses();
+      });
+    };
+    attachKeyboardTargetFocus(surfaceInput, 'surface');
+    attachKeyboardTargetFocus(titleInput, 'title');
+    attachKeyboardTargetFocus(bodyInput, 'body');
+
     this.modalLayerEl.querySelectorAll('[data-pin-style]').forEach((btn) => {
       btn.addEventListener('click', () => {
         this.syncComposerInputsFromDOM();
@@ -2062,7 +2080,10 @@ export class LotusUI {
           | 'title'
           | 'body'
           | 'surface';
-        this.renderNoteComposerModal();
+        this.syncXrKeyboardTargetClasses();
+        // Put the caret in the chosen field too, so physical typing and the
+        // visible cursor match the XR keyboard target.
+        this.focusActiveComposerField();
       });
     });
 
@@ -2074,6 +2095,9 @@ export class LotusUI {
         this.appendTextToActiveField(ch);
         if (this.xrKeyboardShift) this.xrKeyboardShift = false;
         this.renderNoteComposerModal();
+        // The re-render drops focus/caret; restore it into the targeted field
+        // so typing continues there and the caret stays visible.
+        this.focusActiveComposerField();
       });
     });
 
@@ -2097,6 +2121,7 @@ export class LotusUI {
           this.draftSurfaceLabel = this.draftSurfaceLabel.slice(0, -1);
         }
         this.renderNoteComposerModal();
+        this.focusActiveComposerField();
       });
 
     this.modalLayerEl
@@ -2111,6 +2136,7 @@ export class LotusUI {
           this.draftSurfaceLabel = '';
         }
         this.renderNoteComposerModal();
+        this.focusActiveComposerField();
       });
 
     const closeComposer = () => {
@@ -2173,6 +2199,50 @@ export class LotusUI {
     if (surfaceInput) this.draftSurfaceLabel = surfaceInput.value;
     if (titleInput) this.draftTitle = titleInput.value;
     if (bodyInput) this.draftBody = bodyInput.value;
+  }
+
+  /**
+   * Refreshes the XR keyboard target chips and the field highlight from
+   * `activeKeyboardField` without re-rendering the modal (a re-render would
+   * destroy the focused input and its caret).
+   */
+  private syncXrKeyboardTargetClasses() {
+    const field = this.activeKeyboardField;
+    this.modalLayerEl.querySelectorAll('[data-kb-target]').forEach((btn) => {
+      const target = (btn as HTMLElement).dataset.kbTarget;
+      btn.classList.toggle('is-active', target === field);
+    });
+    const inputIds: Array<[string, 'title' | 'body' | 'surface']> = [
+      ['pin-surface-input', 'surface'],
+      ['pin-title-input', 'title'],
+      ['pin-body-input', 'body'],
+    ];
+    for (const [id, targetField] of inputIds) {
+      this.modalLayerEl
+        .querySelector(`#${id}`)
+        ?.classList.toggle('is-kb-focused', targetField === field);
+    }
+  }
+
+  /**
+   * Moves the caret into the field the XR keyboard currently targets (end of
+   * the text), so what the user sees selected matches where keys type.
+   */
+  private focusActiveComposerField() {
+    const inputIds: Record<'title' | 'body' | 'surface', string> = {
+      title: 'pin-title-input',
+      body: 'pin-body-input',
+      surface: 'pin-surface-input',
+    };
+    const input = this.modalLayerEl.querySelector<
+      HTMLInputElement | HTMLTextAreaElement
+    >(`#${inputIds[this.activeKeyboardField]}`);
+    if (!input) return;
+    input.focus({preventScroll: true});
+    if (typeof input.setSelectionRange === 'function') {
+      const end = input.value.length;
+      input.setSelectionRange(end, end);
+    }
   }
 
   private appendTextToActiveField(text: string) {
