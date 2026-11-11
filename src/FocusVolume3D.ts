@@ -8,6 +8,13 @@ import {
 
 const _corner = new THREE.Vector3();
 
+/** Colour of the in-headset peripheral dim for each shield style. */
+const DIM_TINT: Record<ShieldStyle, number> = {
+  frosted: 0x0b111e,
+  dark: 0x000000,
+  ambient: 0x1a1206,
+};
+
 const DIM_VERTEX_SHADER = /* glsl */ `
   varying vec3 vWorldPosition;
 
@@ -62,7 +69,7 @@ export class FocusVolume3D {
   private basePadMesh: THREE.Mesh;
   private cornerPillars: THREE.Mesh[] = [];
   private dimDome: THREE.Mesh;
-  private dofShaderMat: THREE.ShaderMaterial;
+  private dimMaterial: THREE.ShaderMaterial;
   private xrPresenting = false;
   private xrDimActive = false;
   private focusSpotlight: THREE.SpotLight;
@@ -140,7 +147,7 @@ export class FocusVolume3D {
     }
 
     // 5. Peripheral dim shell for immersive AR (see DIM_FRAGMENT_SHADER)
-    this.dofShaderMat = this.trackMat(
+    this.dimMaterial = this.trackMat(
       new THREE.ShaderMaterial({
         uniforms: {
           uFocusCenter: {value: new THREE.Vector3(0, 1.15, -1.42)},
@@ -157,7 +164,7 @@ export class FocusVolume3D {
       }),
     );
     const domeGeo = this.trackGeo(new THREE.SphereGeometry(4, 32, 20));
-    this.dimDome = new THREE.Mesh(domeGeo, this.dofShaderMat);
+    this.dimDome = new THREE.Mesh(domeGeo, this.dimMaterial);
     this.dimDome.visible = false;
     this.dimDome.frustumCulled = false;
     // Drawn before other transparent content so panels and labels stay bright.
@@ -239,11 +246,11 @@ export class FocusVolume3D {
   }
 
   public getFocusCenter3D(): THREE.Vector3 {
-    return this.dofShaderMat.uniforms.uFocusCenter.value;
+    return this.dimMaterial.uniforms.uFocusCenter.value;
   }
 
   public getFocusHalfExtents3D(): THREE.Vector3 {
-    return this.dofShaderMat.uniforms.uFocusHalfExtents.value;
+    return this.dimMaterial.uniforms.uFocusHalfExtents.value;
   }
 
   /**
@@ -256,26 +263,28 @@ export class FocusVolume3D {
     this.applyBoundsGeometry(this.currentBounds, false);
   }
 
-  /** Turns the peripheral dim shell on or off (immersive sessions only). */
+  /**
+   * Requests the peripheral dim shell on or off (immersive sessions only). It
+   * shows only while the zone is also defined; see `syncDimVisibility`.
+   */
   public setXRDim(active: boolean, strength: number, shieldStyle: ShieldStyle) {
-    this.xrDimActive = active && this.currentBounds.defined;
-    this.dimDome.visible = this.xrDimActive;
-    const uniforms = this.dofShaderMat.uniforms;
+    this.xrDimActive = active;
+    const uniforms = this.dimMaterial.uniforms;
     uniforms.uBaseOpacity.value = THREE.MathUtils.clamp(strength, 0, 1) * 0.92;
-    const tint =
-      shieldStyle === 'dark'
-        ? 0x000000
-        : shieldStyle === 'ambient'
-          ? 0x1a1206
-          : 0x0b111e;
-    (uniforms.uTintColor.value as THREE.Color).setHex(tint);
+    (uniforms.uTintColor.value as THREE.Color).setHex(DIM_TINT[shieldStyle]);
+    this.syncDimVisibility();
+  }
+
+  /** The single place that decides whether the dim shell is drawn. */
+  private syncDimVisibility() {
+    this.dimDome.visible = this.xrDimActive && this.currentBounds.defined;
   }
 
   /** Keeps the dim shell centred on the viewer. Call once per frame. */
   public updateDim(cameraWorldPosition: THREE.Vector3) {
-    if (!this.xrDimActive) return;
+    if (!this.dimDome.visible) return;
     this.root.updateWorldMatrix(true, false);
-    (this.dofShaderMat.uniforms.uZoneFromWorld.value as THREE.Matrix4)
+    (this.dimMaterial.uniforms.uZoneFromWorld.value as THREE.Matrix4)
       .copy(this.root.matrixWorld)
       .invert();
     this.dimDome.position.copy(cameraWorldPosition);
@@ -296,12 +305,12 @@ export class FocusVolume3D {
   }
 
   private applyBoundsGeometry(bounds: FocusZoneBounds, showFrame: boolean) {
+    this.syncDimVisibility();
     if (!bounds.defined) {
       this.volumeFillMesh.visible = false;
       this.wireframeBox.visible = false;
       this.basePadMesh.visible = false;
       this.cornerPillars.forEach((p) => (p.visible = false));
-      this.dimDome.visible = false;
       this.focusSpotlight.intensity = 0;
       return;
     }
@@ -314,8 +323,8 @@ export class FocusVolume3D {
     const cy = (bounds.min.y + bounds.max.y) * 0.5;
     const cz = (bounds.min.z + bounds.max.z) * 0.5;
 
-    this.dofShaderMat.uniforms.uFocusCenter.value.set(cx, cy, cz);
-    this.dofShaderMat.uniforms.uFocusHalfExtents.value.set(
+    this.dimMaterial.uniforms.uFocusCenter.value.set(cx, cy, cz);
+    this.dimMaterial.uniforms.uFocusHalfExtents.value.set(
       sx * 0.5,
       sy * 0.5,
       sz * 0.5,

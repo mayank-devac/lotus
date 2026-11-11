@@ -15,6 +15,14 @@ const _camLocalPos = new THREE.Vector3();
 const _billboardQuat = new THREE.Quaternion();
 const _camWorldQuat = new THREE.Quaternion();
 
+/**
+ * Pins keep their real size up to this distance; further away they grow with
+ * distance so they never shrink on screen below how they look from here.
+ * The ray hit sphere scales with them, so far pins stay easy to aim at.
+ */
+const PIN_FULL_SIZE_DISTANCE = 1.5;
+const MAX_PIN_DISTANCE_SCALE = 10;
+
 interface PinNode {
   pin: SpatialPin;
   group: THREE.Group;
@@ -383,6 +391,15 @@ export class PinManager3D {
       _pinCenterPos.copy(node.group.position).applyMatrix4(this.root.matrixWorld);
       const dist = _camWorldPos.distanceTo(_pinCenterPos);
       const withinRadius = dist <= proximityDistanceMeters;
+
+      // Minimum on-screen size (room-space scale: the root carries no scale).
+      node.group.scale.setScalar(
+        THREE.MathUtils.clamp(
+          dist / PIN_FULL_SIZE_DISTANCE,
+          1,
+          MAX_PIN_DISTANCE_SCALE,
+        ),
+      );
 
       let shouldShowHeader = false;
       if (headerPopEnabled) {

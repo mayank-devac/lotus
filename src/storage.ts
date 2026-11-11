@@ -71,6 +71,35 @@ export const DEFAULT_SETTINGS: LotusSettings = {
   soundEnabled: true,
 };
 
+/**
+ * The seeded sample pin, still exactly where the seed put it. Its made-up
+ * "desk" coordinates are an arbitrary spot in a real room.
+ */
+export function isPristineSamplePin(pin: SpatialPin): boolean {
+  return DEFAULT_PINS.some(
+    (sample) =>
+      pin.id === sample.id &&
+      pin.title === sample.title &&
+      pin.position.x === sample.position.x &&
+      pin.position.y === sample.position.y &&
+      pin.position.z === sample.position.z,
+  );
+}
+
+/** The focus zone still holds the made-up default rather than a real spot. */
+export function isDefaultFocusZone(zone: FocusZoneBounds): boolean {
+  return !zone.defined || zone.label === DEFAULT_FOCUS_ZONE.label;
+}
+
+/** How strongly the surroundings are hidden while focusing, 0 (clear) to 1. */
+export function getShieldStrength(settings: LotusSettings): number {
+  const visibility = Math.max(
+    0,
+    Math.min(100, settings.focusAreaVisibility ?? DEFAULT_SETTINGS.focusAreaVisibility),
+  );
+  return 1 - visibility / 100;
+}
+
 export const ROOM_WAYPOINTS: RoomWaypoint[] = [
   {
     id: 'close',

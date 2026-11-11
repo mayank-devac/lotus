@@ -67,6 +67,18 @@ export interface LotusSettings {
   soundEnabled: boolean;
 }
 
+/** Result of casting a ray into the room (not persisted). */
+export interface SpatialHit {
+  /** Position in room space (the space pins and the focus zone are stored in). */
+  point: Vector3Data;
+  normal: Vector3Data;
+  surfaceLabel: string;
+  /** False when nothing was hit and the point is the fallback along the ray. */
+  isSurface: boolean;
+  /** Distance from the ray origin, in metres. */
+  distance: number;
+}
+
 export interface RoomWaypoint {
   id: string;
   label: string;

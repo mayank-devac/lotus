@@ -1,12 +1,13 @@
 import * as THREE from 'three';
 import {AppMode, PinScreenProjection, SpatialPin} from './types';
+import {XRTextInputMethod} from './xrTextInput';
 
 /**
  * In-headset interface. The DOM overlay (LotusUI) is not composited into an
  * immersive session, so everything the user needs while wearing the headset is
  * drawn here as canvas-textured panels in the 3D scene:
  *  - a control panel that lazily follows the head (timer, place pin, focus area, exit)
- *  - a card next to an opened pin (title, note, dictate, delete)
+ *  - a card next to an opened pin (title, note, type / say text, delete)
  *  - a title label above pins that are hovered or within proximity
  *  - a ray and cursor dot per controller / hand so the user can see where they aim
  *
@@ -15,21 +16,18 @@ import {AppMode, PinScreenProjection, SpatialPin} from './types';
  */
 
 export type XRHudAction = 'toggle-timer' | 'place-pin' | 'focus-zone' | 'exit-xr';
-export type XRCardAction = 'close' | 'delete' | 'dictate-title' | 'dictate-note';
-export type XRPanelName = 'hud' | 'card';
+export type XRCardAction = 'close' | 'delete' | 'edit-title' | 'edit-note';
 
 export interface XRHudState {
   clock: string;
   timerRunning: boolean;
   mode: AppMode;
-  status: string;
 }
 
-export interface XRPanelHit {
-  panel: XRPanelName;
-  distance: number;
-  action: string | null;
-}
+/** A ray resting on a panel; `action` is null over the panel body. */
+export type XRPanelHit =
+  | {panel: 'hud'; distance: number; action: XRHudAction | null}
+  | {panel: 'card'; distance: number; action: XRCardAction | null};
 
 export interface XRPointerRay {
   origin: THREE.Vector3;
@@ -38,13 +36,20 @@ export interface XRPointerRay {
   showDot: boolean;
 }
 
-interface PanelButton {
-  id: string;
+interface PanelButton<Id extends string> {
+  id: Id;
   x: number;
   y: number;
   w: number;
   h: number;
 }
+
+/** What the control panel says when no temporary message is showing. */
+const MODE_HINTS: Record<AppMode, string> = {
+  'explore': 'Pinch a pin to open it, drag to move it',
+  'pin-add': 'Pinch where the pin should go',
+  'focus-drag': 'Pinch and drag across your focus area',
+};
 
 const FONT_BODY = '"Space Grotesk", system-ui, sans-serif';
 const FONT_MONO = '"JetBrains Mono", ui-monospace, monospace';
@@ -55,10 +60,36 @@ const BUTTON_HOVER_BG = 'rgba(255, 255, 255, 0.26)';
 const TEXT_MAIN = '#F5F4EF';
 const TEXT_DIM = '#B9B8B0';
 
+/**
+ * The control panel floats past arm's reach, so a controller held out never
+ * ends up level with (or through) it, where its ray can no longer hit it.
+ * It is scaled up with the distance to keep the same apparent size.
+ */
+const HUD_DISTANCE = 0.85;
+const HUD_DROP = 0.22;
+const HUD_SCALE = HUD_DISTANCE / 0.55;
+/** Rays that just miss a panel's edge still count, up to this many metres. */
+const PANEL_EDGE_MARGIN = 0.015;
+/** Gaps between buttons resolve to the nearest button within this (px). */
+const BUTTON_HIT_PAD_PX = 14;
+/** The hovered button keeps hover a bit further out, so jitter can't flicker it. */
+const BUTTON_HOVER_KEEP_PX = 26;
+/**
+ * Text near the user is drawn at its natural size; past this distance it grows
+ * with distance, so it never gets smaller on screen than it is here.
+ */
+const TEXT_FULL_SIZE_DISTANCE = 0.8;
+const MAX_TEXT_SCALE = 12;
+
 const _camPos = new THREE.Vector3();
 const _forward = new THREE.Vector3();
 const _target = new THREE.Vector3();
 const _tmp = new THREE.Vector3();
+const _hitInverse = new THREE.Matrix4();
+const _localRay = new THREE.Ray();
+const _hitLocal = new THREE.Vector3();
+const _hitWorld = new THREE.Vector3();
+const _hitScale = new THREE.Vector3();
 
 function roundRectPath(
   ctx: CanvasRenderingContext2D,
@@ -123,19 +154,19 @@ function fitText(
 }
 
 /** A flat panel whose face is a 2D canvas with rectangular button regions. */
-class CanvasPanel {
+class CanvasPanel<Id extends string> {
   public readonly mesh: THREE.Mesh;
   public readonly canvas: HTMLCanvasElement;
   public readonly ctx: CanvasRenderingContext2D;
-  public buttons: PanelButton[] = [];
-  public hoveredButton: string | null = null;
+  public buttons: PanelButton<Id>[] = [];
+  public hoveredButton: Id | null = null;
   private texture: THREE.CanvasTexture;
   private geometry: THREE.PlaneGeometry;
   private material: THREE.MeshBasicMaterial;
 
   constructor(
-    widthMeters: number,
-    heightMeters: number,
+    public readonly widthMeters: number,
+    public readonly heightMeters: number,
     public readonly pxWidth: number,
     public readonly pxHeight: number,
   ) {
@@ -176,7 +207,7 @@ class CanvasPanel {
   }
 
   public drawButton(
-    id: string,
+    id: Id,
     label: string,
     x: number,
     y: number,
@@ -214,19 +245,53 @@ class CanvasPanel {
     this.texture.needsUpdate = true;
   }
 
-  /** Returns the hit distance and the button under the ray, if any. */
+  /**
+   * Returns the hit distance and the button under the ray, if any.
+   *
+   * Intersects the panel's plane directly instead of its triangles, so a ray
+   * grazing the edge (within PANEL_EDGE_MARGIN) still lands, and picks the
+   * nearest button within a few pixels so the gaps between buttons aren't
+   * dead zones.
+   */
   public hit(
     raycaster: THREE.Raycaster,
-  ): {distance: number; buttonId: string | null} | null {
-    if (!this.mesh.visible) return null;
-    const hit = raycaster.intersectObject(this.mesh, false)[0];
-    if (!hit || !hit.uv) return null;
-    const px = hit.uv.x * this.pxWidth;
-    const py = (1 - hit.uv.y) * this.pxHeight;
-    const button = this.buttons.find(
-      (b) => px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h,
-    );
-    return {distance: hit.distance, buttonId: button?.id ?? null};
+  ): {distance: number; buttonId: Id | null} | null {
+    if (!this.mesh.visible || !this.mesh.parent?.visible) return null;
+    const mesh = this.mesh;
+    mesh.updateWorldMatrix(true, false);
+    _hitInverse.copy(mesh.matrixWorld).invert();
+    _localRay.copy(raycaster.ray).applyMatrix4(_hitInverse);
+    // Panel is the local z = 0 plane.
+    if (Math.abs(_localRay.direction.z) < 1e-6) return null;
+    const t = -_localRay.origin.z / _localRay.direction.z;
+    if (t < 0) return null;
+    _localRay.at(t, _hitLocal);
+    const scale = mesh.getWorldScale(_hitScale).x || 1;
+    const margin = PANEL_EDGE_MARGIN / scale;
+    const halfW = this.widthMeters / 2;
+    const halfH = this.heightMeters / 2;
+    if (Math.abs(_hitLocal.x) > halfW + margin) return null;
+    if (Math.abs(_hitLocal.y) > halfH + margin) return null;
+    _hitWorld.copy(_hitLocal).applyMatrix4(mesh.matrixWorld);
+    const distance = _hitWorld.distanceTo(raycaster.ray.origin);
+    if (distance < raycaster.near || distance > raycaster.far) return null;
+
+    const px = (_hitLocal.x / this.widthMeters + 0.5) * this.pxWidth;
+    const py = (0.5 - _hitLocal.y / this.heightMeters) * this.pxHeight;
+    let best: PanelButton<Id> | null = null;
+    let bestGap = Infinity;
+    for (const b of this.buttons) {
+      const dx = Math.max(b.x - px, 0, px - (b.x + b.w));
+      const dy = Math.max(b.y - py, 0, py - (b.y + b.h));
+      const gap = Math.hypot(dx, dy);
+      const pad =
+        b.id === this.hoveredButton ? BUTTON_HOVER_KEEP_PX : BUTTON_HIT_PAD_PX;
+      if (gap <= pad && gap < bestGap) {
+        best = b;
+        bestGap = gap;
+      }
+    }
+    return {distance, buttonId: best?.id ?? null};
   }
 
   public dispose() {
@@ -249,74 +314,21 @@ interface PointerVisual {
   dot: THREE.Mesh;
 }
 
-type SpeechRecognitionLike = {
-  lang: string;
-  interimResults: boolean;
-  maxAlternatives: number;
-  onresult: ((event: {results: ArrayLike<ArrayLike<{transcript: string}>>}) => void) | null;
-  onerror: (() => void) | null;
-  onend: (() => void) | null;
-  start: () => void;
-  stop: () => void;
-};
-
-function getSpeechRecognitionCtor(): (new () => SpeechRecognitionLike) | null {
-  const w = window as unknown as {
-    SpeechRecognition?: new () => SpeechRecognitionLike;
-    webkitSpeechRecognition?: new () => SpeechRecognitionLike;
-  };
-  return w.SpeechRecognition || w.webkitSpeechRecognition || null;
-}
-
-/**
- * One-shot voice dictation through the Web Speech API. Returns a stop function,
- * or null when the browser has no speech recognition.
- */
-export function dictateOnce(
-  onText: (text: string) => void,
-  onEnd: (failed: boolean) => void,
-): (() => void) | null {
-  const Ctor = getSpeechRecognitionCtor();
-  if (!Ctor) return null;
-  try {
-    const recognizer = new Ctor();
-    let failed = false;
-    recognizer.lang = navigator.language || 'en-US';
-    recognizer.interimResults = false;
-    recognizer.maxAlternatives = 1;
-    recognizer.onresult = (event) => {
-      const text = event.results[0]?.[0]?.transcript?.trim();
-      if (text) onText(text);
-    };
-    recognizer.onerror = () => {
-      failed = true;
-    };
-    recognizer.onend = () => onEnd(failed);
-    recognizer.start();
-    return () => {
-      try {
-        recognizer.stop();
-      } catch {
-        // Already stopped
-      }
-    };
-  } catch {
-    return null;
-  }
-}
-
 export class XRInterface {
   public readonly root = new THREE.Group();
-  public readonly speechSupported = Boolean(getSpeechRecognitionCtor());
+  /** Decides the card's text buttons; set when a session starts. */
+  private textInput: XRTextInputMethod = 'none';
 
-  private hud = new CanvasPanel(0.43, 0.2, 860, 400);
-  private card = new CanvasPanel(0.36, 0.28, 720, 560);
+  private hud = new CanvasPanel<XRHudAction>(0.43, 0.2, 860, 400);
+  private card = new CanvasPanel<XRCardAction>(0.36, 0.28, 720, 560);
   private hudState: XRHudState = {
     clock: '00:00',
     timerRunning: false,
     mode: 'explore',
-    status: '',
   };
+  private hudStatus = '';
+  private flashText = '';
+  private flashUntil = 0;
   private hudKey = '';
   private hudNeedsSnap = true;
   private hudFollowing = false;
@@ -362,8 +374,14 @@ export class XRInterface {
     this.drawHud();
   }
 
+  public setTextInputMethod(method: XRTextInputMethod) {
+    this.textInput = method;
+    if (this.cardPin) this.drawCard();
+  }
+
   public setActive(active: boolean) {
     this.root.visible = active;
+    this.flashText = '';
     if (active) {
       this.hudNeedsSnap = true;
     } else {
@@ -377,11 +395,22 @@ export class XRInterface {
   // Control panel
   // ---------------------------------------------------------------------------
 
+  /** Shows a temporary message on the control panel in place of the mode hint. */
+  public flashStatus(text: string, seconds = 4) {
+    this.flashText = text;
+    this.flashUntil = performance.now() + seconds * 1000;
+  }
+
   public updateHud(state: XRHudState, camera: THREE.Camera, delta: number) {
-    const key = `${state.clock}|${state.timerRunning}|${state.mode}|${state.status}|${this.hud.hoveredButton}`;
+    const status =
+      this.flashText && performance.now() < this.flashUntil
+        ? this.flashText
+        : MODE_HINTS[state.mode];
+    const key = `${state.clock}|${state.timerRunning}|${state.mode}|${status}|${this.hud.hoveredButton}`;
     if (key !== this.hudKey) {
       this.hudKey = key;
       this.hudState = state;
+      this.hudStatus = status;
       this.drawHud();
     }
 
@@ -392,16 +421,17 @@ export class XRInterface {
     _forward.y = 0;
     if (_forward.lengthSq() > 0.0001) {
       _forward.normalize();
-      _target.copy(_camPos).addScaledVector(_forward, 0.55);
-      _target.y = _camPos.y - 0.3;
+      _target.copy(_camPos).addScaledVector(_forward, HUD_DISTANCE);
+      _target.y = _camPos.y - HUD_DROP;
       const mesh = this.hud.mesh;
+      mesh.scale.setScalar(HUD_SCALE);
       if (this.hudNeedsSnap) {
         mesh.position.copy(_target);
         this.hudNeedsSnap = false;
         this.hudFollowing = false;
       } else {
         const offBy = mesh.position.distanceTo(_target);
-        if (offBy > 0.45) this.hudFollowing = true;
+        if (offBy > 0.45 * HUD_SCALE) this.hudFollowing = true;
         if (this.hudFollowing) {
           mesh.position.lerp(_target, 1 - Math.exp(-6 * delta));
           if (offBy < 0.03) this.hudFollowing = false;
@@ -427,7 +457,7 @@ export class XRInterface {
 
     ctx.fillStyle = TEXT_DIM;
     ctx.font = `500 28px ${FONT_BODY}`;
-    ctx.fillText(fitText(ctx, s.status, 780), 40, 208);
+    ctx.fillText(fitText(ctx, this.hudStatus, 780), 40, 208);
 
     const y = 244;
     const h = 116;
@@ -510,8 +540,12 @@ export class XRInterface {
     }
     camera.getWorldPosition(_camPos);
     const dist = _camPos.distanceTo(pinWorldPos);
-    // Grow with distance so the text stays readable for far pins.
-    const scale = THREE.MathUtils.clamp(dist / 0.8, 1, 3.5);
+    // Grow with distance so the card never looks smaller than it does up close.
+    const scale = THREE.MathUtils.clamp(
+      dist / TEXT_FULL_SIZE_DISTANCE,
+      1,
+      MAX_TEXT_SCALE,
+    );
     const mesh = this.card.mesh;
     mesh.scale.setScalar(scale);
     _tmp.copy(_camPos).sub(pinWorldPos);
@@ -561,12 +595,13 @@ export class XRInterface {
     const by = 440;
     const bh = 88;
     const armed = performance.now() < this.deleteArmedUntil;
-    if (this.speechSupported) {
+    if (this.textInput !== 'none') {
+      const verb = this.textInput === 'keyboard' ? 'Type' : 'Say';
       card.drawButton('close', 'Close', 24, by, 130, bh, {fontPx: 26});
-      card.drawButton('dictate-title', 'Say title', 164, by, 170, bh, {
+      card.drawButton('edit-title', `${verb} title`, 164, by, 170, bh, {
         fontPx: 26,
       });
-      card.drawButton('dictate-note', 'Say note', 344, by, 170, bh, {
+      card.drawButton('edit-note', `${verb} note`, 344, by, 170, bh, {
         fontPx: 26,
       });
       card.drawButton('delete', armed ? 'Confirm?' : 'Delete', 524, by, 172, bh, {
@@ -646,7 +681,11 @@ export class XRInterface {
         label.sprite.visible = false;
         continue;
       }
-      const scale = THREE.MathUtils.clamp(proj.distanceMeters / 0.8, 1, 4);
+      const scale = THREE.MathUtils.clamp(
+        proj.distanceMeters / TEXT_FULL_SIZE_DISTANCE,
+        1,
+        MAX_TEXT_SCALE,
+      );
       label.sprite.visible = true;
       label.sprite.position.copy(_tmp);
       label.sprite.position.y += 0.07 * scale;

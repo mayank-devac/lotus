@@ -1,7 +1,8 @@
 import * as d3 from 'd3';
 import MONO_LOTUS_SVG from '../assets/icon.svg?raw';
 import {lotusSound} from './sound';
-import {ROOM_WAYPOINTS, vec3} from './storage';
+import {dictateOnce, isSpeechSupported} from './speech';
+import {ROOM_WAYPOINTS, getShieldStrength, vec3} from './storage';
 import {
   AppMode,
   FocusZoneBounds,
@@ -135,8 +136,7 @@ export class LotusUI {
   private isListeningInspectorVoice = false;
   private voiceTargetField: 'title' | 'body' = 'body';
   private voiceStatusText = 'Tap microphone to speak or type directly';
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private speechRecognizer: any = null;
+  private stopDictation: (() => void) | null = null;
 
   // DOM References
   private proximityPulseLayerEl!: HTMLElement;
@@ -684,11 +684,7 @@ export class LotusUI {
     const halfH = Math.max(40, rh * 0.5);
 
     // Higher VISIBILITY % means MORE visibility of surroundings (less mask/blur opacity)
-    const visibilityPercent = Math.max(
-      0,
-      Math.min(100, this.settings.focusAreaVisibility ?? 25),
-    );
-    const shieldStrength = 1 - visibilityPercent / 100;
+    const shieldStrength = getShieldStrength(this.settings);
 
     // 1. Update projected spatial pins (with dynamic Depth-of-Field blur based on distance from focus center)
     for (const proj of pinProjections) {
@@ -2189,13 +2185,7 @@ export class LotusUI {
     this.voiceTargetField = targetField;
     this.activeKeyboardField = targetField;
 
-    const SpeechRecognitionCtor =
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).SpeechRecognition ||
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).webkitSpeechRecognition;
-
-    if (!SpeechRecognitionCtor) {
+    if (!isSpeechSupported()) {
       this.voiceStatusText = 'Voice note captured.';
       if (targetField === 'title') {
         this.draftTitle =
@@ -2209,43 +2199,28 @@ export class LotusUI {
       return;
     }
 
-    try {
-      const recognizer = new SpeechRecognitionCtor();
-      this.speechRecognizer = recognizer;
-      recognizer.lang = 'en-US';
-      recognizer.interimResults = false;
-      recognizer.maxAlternatives = 1;
+    this.isListeningVoice = true;
+    this.voiceStatusText = 'Listening… Speak now.';
+    this.renderNoteComposerModal();
 
-      this.isListeningVoice = true;
-      this.voiceStatusText = 'Listening… Speak now.';
-      this.renderNoteComposerModal();
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      recognizer.onresult = (event: any) => {
-        const transcript = event.results?.[0]?.[0]?.transcript || '';
-        if (transcript) {
-          if (this.voiceTargetField === 'title') {
-            this.draftTitle = (this.draftTitle + ' ' + transcript).trim();
-          } else {
-            this.draftBody = (this.draftBody + ' ' + transcript).trim();
-          }
-          this.voiceStatusText = `Heard: "${transcript}"`;
+    this.stopDictation = dictateOnce(
+      (transcript) => {
+        if (this.voiceTargetField === 'title') {
+          this.draftTitle = (this.draftTitle + ' ' + transcript).trim();
+        } else {
+          this.draftBody = (this.draftBody + ' ' + transcript).trim();
         }
-      };
-
-      recognizer.onerror = () => {
+        this.voiceStatusText = `Heard: "${transcript}"`;
+      },
+      (failed) => {
         this.isListeningVoice = false;
-        this.voiceStatusText = 'Mic unavailable — type or use XR Keyboard.';
+        if (failed) {
+          this.voiceStatusText = 'Mic unavailable — type or use XR Keyboard.';
+        }
         if (this.isComposerOpen) this.renderNoteComposerModal();
-      };
-
-      recognizer.onend = () => {
-        this.isListeningVoice = false;
-        if (this.isComposerOpen) this.renderNoteComposerModal();
-      };
-
-      recognizer.start();
-    } catch {
+      },
+    );
+    if (!this.stopDictation) {
       this.isListeningVoice = false;
       this.renderNoteComposerModal();
     }
@@ -2254,14 +2229,8 @@ export class LotusUI {
   private stopVoiceDictation() {
     this.isListeningVoice = false;
     this.isListeningInspectorVoice = false;
-    if (this.speechRecognizer) {
-      try {
-        this.speechRecognizer.stop();
-      } catch {
-        // Ignore
-      }
-      this.speechRecognizer = null;
-    }
+    this.stopDictation?.();
+    this.stopDictation = null;
   }
 
   private toggleInspectorVoiceDictation(
@@ -2274,12 +2243,6 @@ export class LotusUI {
       micBtn?.classList.remove('is-listening');
       return;
     }
-
-    const SpeechRecognitionCtor =
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).SpeechRecognition ||
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).webkitSpeechRecognition;
 
     const applyDictatedNote = (spokenText: string) => {
       const currentVal = noteTextarea ? noteTextarea.value : pin.body;
@@ -2295,47 +2258,22 @@ export class LotusUI {
       this.refreshPinMarkerContent();
     };
 
-    if (!SpeechRecognitionCtor) {
+    if (!isSpeechSupported()) {
       lotusSound.playKeyTap();
       noteTextarea?.focus();
       applyDictatedNote(`Voice note added for ${pin.surfaceLabel}.`);
       return;
     }
 
-    try {
-      const recognizer = new SpeechRecognitionCtor();
-      this.speechRecognizer = recognizer;
-      recognizer.lang = 'en-US';
-      recognizer.interimResults = false;
-      recognizer.maxAlternatives = 1;
-
-      this.isListeningInspectorVoice = true;
-      micBtn?.classList.add('is-listening');
-      lotusSound.playKeyTap();
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      recognizer.onresult = (event: any) => {
-        const transcript = event.results?.[0]?.[0]?.transcript || '';
-        if (transcript) {
-          applyDictatedNote(transcript);
-        }
-      };
-
-      recognizer.onerror = () => {
-        this.isListeningInspectorVoice = false;
-        micBtn?.classList.remove('is-listening');
-      };
-
-      recognizer.onend = () => {
-        this.isListeningInspectorVoice = false;
-        micBtn?.classList.remove('is-listening');
-      };
-
-      recognizer.start();
-    } catch {
+    const stopListening = () => {
       this.isListeningInspectorVoice = false;
       micBtn?.classList.remove('is-listening');
-    }
+    };
+    this.isListeningInspectorVoice = true;
+    micBtn?.classList.add('is-listening');
+    lotusSound.playKeyTap();
+    this.stopDictation = dictateOnce(applyDictatedNote, stopListening);
+    if (!this.stopDictation) stopListening();
   }
 
   private renderPinInspectorModal(pin: SpatialPin) {

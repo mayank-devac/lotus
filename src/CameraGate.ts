@@ -9,9 +9,24 @@
  * re-shown rather than destroyed, and a small "Enter XR" chip stays on screen
  * whenever the card is dismissed.
  */
+import {IS_STANDALONE_HEADSET} from './device';
+
 export type CameraGateResult = 'granted' | 'skipped';
 
 const XR_WRAPPER_SELECTOR = '#XRButtonWrapper';
+
+/**
+ * Headset copy for the card. A standalone headset has no useful webcam view
+ * (the browser camera is not the room), so once XR is detected there it is
+ * offered only Enter XR.
+ */
+const HEADSET_COPY = IS_STANDALONE_HEADSET
+  ? 'Tap <strong>Enter XR</strong> to see your room through the headset. ' +
+    'Memory pins stay attached to real walls, desks and objects.'
+  : 'This device supports immersive AR. Tap <strong>Enter XR</strong> to ' +
+    'see your room through the device itself, or enable the camera to stay ' +
+    'in the browser.';
+const SKIP_LABEL = IS_STANDALONE_HEADSET ? 'Not now' : 'Continue without camera';
 
 export class CameraGate {
   private el: HTMLDivElement;
@@ -45,14 +60,10 @@ export class CameraGate {
           stay attached to real walls, desks and objects. Video never leaves
           your device.
         </p>
-        <p class="lotus-camera-gate-headset" hidden>
-          This device supports immersive AR. Tap <strong>Enter XR</strong> to
-          see your room through the device itself, or enable the camera to
-          stay in the browser.
-        </p>
+        <p class="lotus-camera-gate-headset" hidden>${HEADSET_COPY}</p>
         <button type="button" class="lotus-camera-gate-primary lotus-camera-gate-xr" hidden>Enter XR</button>
         <button type="button" class="lotus-camera-gate-primary lotus-camera-gate-enable">Enable camera</button>
-        <button type="button" class="lotus-camera-gate-secondary">Continue without camera</button>
+        <button type="button" class="lotus-camera-gate-secondary">${SKIP_LABEL}</button>
         <p class="lotus-camera-gate-status" role="status" aria-live="polite"></p>
       </div>
     `;
@@ -92,23 +103,13 @@ export class CameraGate {
       this.xrSupported = true;
       this.headsetEl.hidden = false;
       this.xrBtn.hidden = false;
-      // Enter XR becomes the main action; the webcam is the fallback.
+      // Enter XR becomes the main action; the webcam is the fallback (and is
+      // not offered at all on a standalone headset).
       this.enableBtn.classList.add('is-fallback');
-      // A standalone headset has no useful webcam view: the browser camera is
-      // not the room. Offer only Enter XR there.
-      if (/OculusBrowser|Quest/i.test(navigator.userAgent)) {
+      if (IS_STANDALONE_HEADSET) {
         this.enableBtn.hidden = true;
-        const copyEl = this.el.querySelector<HTMLElement>(
-          '.lotus-camera-gate-copy',
-        );
-        if (copyEl) copyEl.hidden = true;
-        this.headsetEl.innerHTML =
-          'Tap <strong>Enter XR</strong> to see your room through the headset. ' +
-          'Memory pins stay attached to real walls, desks and objects.';
-        const skipBtn = this.el.querySelector<HTMLButtonElement>(
-          '.lotus-camera-gate-secondary',
-        );
-        if (skipBtn) skipBtn.textContent = 'Not now';
+        this.el.querySelector<HTMLElement>('.lotus-camera-gate-copy')!.hidden =
+          true;
       }
       this.syncVisibility(this.el.isConnected);
     } catch {
