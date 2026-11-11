@@ -4,6 +4,14 @@ import {lotusSound} from './sound';
 import {dictateOnce, isSpeechSupported} from './speech';
 import {ROOM_WAYPOINTS, getShieldStrength, vec3} from './storage';
 import {
+  TASK_TIMER_PRESETS_MIN,
+  createTask,
+  pinContentFromTask,
+  taskClockText,
+  toggleTaskDone,
+  toggleTaskTimer,
+} from './tasks';
+import {
   AppMode,
   FocusZoneBounds,
   LotusSettings,
@@ -233,13 +241,7 @@ export class LotusUI {
   }
 
   public formatTaskTimer(task: LotusTask): string {
-    const sec =
-      task.remainingSeconds ??
-      task.timerSeconds ??
-      this.settings.presetMinutes * 60;
-    const mins = Math.floor(sec / 60);
-    const rem = sec % 60;
-    return `${String(mins).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
+    return taskClockText(task);
   }
 
   private getTasksNavButtonLabelHtml(): string {
@@ -367,6 +369,11 @@ export class LotusUI {
       }
     }
     this.renderAllPanels();
+  }
+
+  /** The live task list, including timers that are counting down. */
+  public getTasks(): LotusTask[] {
+    return this.tasks;
   }
 
   public setTasks(tasks: LotusTask[]) {
@@ -1255,22 +1262,7 @@ export class LotusUI {
         e.stopPropagation();
         const taskId = (btn as HTMLElement).dataset.hoverToggleTimer;
         if (!taskId) return;
-        const targetTask = this.tasks.find((t) => t.id === taskId);
-        const willRun = targetTask ? !targetTask.timerRunning : false;
-        this.tasks = this.tasks.map((t) => {
-          if (t.id === taskId) {
-            const rem =
-              (t.remainingSeconds ?? t.timerSeconds ?? 25 * 60) <= 0
-                ? (t.timerSeconds ?? 25 * 60)
-                : (t.remainingSeconds ?? t.timerSeconds ?? 25 * 60);
-            return {
-              ...t,
-              timerRunning: willRun,
-              remainingSeconds: rem,
-            };
-          }
-          return willRun ? {...t, timerRunning: false} : t;
-        });
+        this.tasks = toggleTaskTimer(this.tasks, taskId);
         lotusSound.playKeyTap();
         this.callbacks.onSaveTasks(this.tasks);
         this.renderAllPanels();
@@ -2663,7 +2655,7 @@ export class LotusUI {
 
                 <div class="lotus-task-due-presets">
                   <span class="lotus-field-label" style="font-size: 0.66rem;">Timer:</span>
-                  ${[15, 25, 45, 60]
+                  ${TASK_TIMER_PRESETS_MIN
                     .map(
                       (min) => `
                     <button
@@ -2870,21 +2862,13 @@ export class LotusUI {
         return;
       }
 
-      const durationSec = Math.max(1, this.draftTaskTimerMin) * 60;
-      const newTask: LotusTask = {
-        id: `task-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      const newTask = createTask({
         title: trimmedTitle,
-        note: this.draftTaskNote.trim(),
-        dueLabel:
-          this.draftTaskDueLabel.trim() ||
-          (this.draftTaskType === 'reminder' ? 'Reminder' : ''),
+        note: this.draftTaskNote,
+        dueLabel: this.draftTaskDueLabel,
         type: this.draftTaskType,
-        timerSeconds: durationSec,
-        remainingSeconds: durationSec,
-        timerRunning: false,
-        completed: false,
-        createdAt: Date.now(),
-      };
+        timerMinutes: this.draftTaskTimerMin,
+      });
 
       this.tasks = [newTask, ...this.tasks];
       this.draftTaskTitle = '';
@@ -2959,22 +2943,7 @@ export class LotusUI {
           syncDraftTaskFields();
           const taskId = (btn as HTMLElement).dataset.toggleTaskTimer;
           if (!taskId) return;
-          const targetTask = this.tasks.find((t) => t.id === taskId);
-          const willRun = targetTask ? !targetTask.timerRunning : false;
-          this.tasks = this.tasks.map((t) => {
-            if (t.id === taskId) {
-              const rem =
-                (t.remainingSeconds ?? t.timerSeconds ?? 25 * 60) <= 0
-                  ? (t.timerSeconds ?? 25 * 60)
-                  : (t.remainingSeconds ?? t.timerSeconds ?? 25 * 60);
-              return {
-                ...t,
-                timerRunning: willRun,
-                remainingSeconds: rem,
-              };
-            }
-            return willRun ? {...t, timerRunning: false} : t;
-          });
+          this.tasks = toggleTaskTimer(this.tasks, taskId);
           lotusSound.playKeyTap();
           this.callbacks.onSaveTasks(this.tasks);
           this.renderAllPanels();
@@ -2987,20 +2956,10 @@ export class LotusUI {
         syncDraftTaskFields();
         const taskId = (el as HTMLElement).dataset.tickTask;
         if (!taskId) return;
-        let nextCompletedState = false;
-        this.tasks = this.tasks.map((t) => {
-          if (t.id === taskId) {
-            nextCompletedState = !t.completed;
-            return {
-              ...t,
-              completed: nextCompletedState,
-              timerRunning: false,
-              completedAt: nextCompletedState ? Date.now() : undefined,
-            };
-          }
-          return t;
-        });
-        lotusSound.playTaskTick(nextCompletedState);
+        this.tasks = toggleTaskDone(this.tasks, taskId);
+        lotusSound.playTaskTick(
+          Boolean(this.tasks.find((t) => t.id === taskId)?.completed),
+        );
         this.callbacks.onSaveTasks(this.tasks);
         this.renderAllPanels();
       });
@@ -3028,15 +2987,7 @@ export class LotusUI {
           const task = this.tasks.find((t) => t.id === taskId);
           if (!task) return;
           // Show surroundings first so user taps where to place the pin, then open Save UI!
-          this.enterPinAddMode({
-            title: task.title,
-            body:
-              [task.dueLabel ? `Due: ${task.dueLabel}` : '', task.note]
-                .filter(Boolean)
-                .join(' — ') || task.title,
-            surfaceLabel:
-              task.type === 'reminder' ? 'Reminder Pin' : 'Task Pin',
-          });
+          this.enterPinAddMode(pinContentFromTask(task));
         });
       });
 

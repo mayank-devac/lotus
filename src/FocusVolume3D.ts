@@ -56,6 +56,44 @@ const DIM_FRAGMENT_SHADER = /* glsl */ `
   }
 `;
 
+/** No side of a focus zone is smaller than this (m), however short the drag. */
+const MIN_ZONE_SIZE = 0.35;
+/** A zone dragged out on a surface reaches this far (m) above it. */
+const SURFACE_ZONE_HEIGHT = 0.72;
+
+/**
+ * The focus zone spanned by two dragged corners, in the space the corners are
+ * given in. On a surface (desk, floor) the corners mark out its footprint and
+ * the zone rises a fixed height above it; otherwise (a wall, a screen) the
+ * corners also set its height.
+ */
+export function focusZoneFromDrag(
+  p1: Vector3Data,
+  p2: Vector3Data,
+  onSurface: boolean,
+  name = 'Focus Area',
+): FocusZoneBounds {
+  const span = (a: number, b: number): [number, number] => {
+    const size = Math.max(MIN_ZONE_SIZE, Math.abs(a - b));
+    const mid = (a + b) * 0.5;
+    return [mid - size * 0.5, mid + size * 0.5];
+  };
+  const [minX, maxX] = span(p1.x, p2.x);
+  const [minZ, maxZ] = span(p1.z, p2.z);
+  const baseY = Math.min(p1.y, p2.y);
+  const [minY, maxY] = onSurface
+    ? [baseY - 0.02, baseY + SURFACE_ZONE_HEIGHT]
+    : span(p1.y, p2.y);
+  const width = maxX - minX;
+  const depth = maxZ - minZ;
+  return {
+    defined: true,
+    label: `${name} (${width.toFixed(2)}m × ${depth.toFixed(2)}m)`,
+    min: {x: minX, y: minY, z: minZ},
+    max: {x: maxX, y: maxY, z: maxZ},
+  };
+}
+
 /**
  * Manages the 3D drag-to-select Focus Zone bounding volume, its wireframe
  * frame (shown in immersive sessions), the peripheral dim shell that stands in
@@ -205,32 +243,7 @@ export class FocusVolume3D {
     p2: Vector3Data,
     surfaceLabel = 'Custom Focus Zone',
   ): FocusZoneBounds {
-    const minX = Math.min(p1.x, p2.x);
-    const maxX = Math.max(p1.x, p2.x);
-    const minZ = Math.min(p1.z, p2.z);
-    const maxZ = Math.max(p1.z, p2.z);
-    const baseY = Math.min(p1.y, p2.y);
-
-    const width = Math.max(0.35, maxX - minX);
-    const depth = Math.max(0.35, maxZ - minZ);
-    const cx = (minX + maxX) * 0.5;
-    const cz = (minZ + maxZ) * 0.5;
-
-    const bounds: FocusZoneBounds = {
-      defined: true,
-      label: `${surfaceLabel} (${width.toFixed(2)}m × ${depth.toFixed(2)}m)`,
-      min: {
-        x: cx - width * 0.5,
-        y: baseY - 0.02,
-        z: cz - depth * 0.5,
-      },
-      max: {
-        x: cx + width * 0.5,
-        y: baseY + 0.72,
-        z: cz + depth * 0.5,
-      },
-    };
-
+    const bounds = focusZoneFromDrag(p1, p2, true, surfaceLabel);
     this.currentBounds = bounds;
     this.applyBoundsGeometry(bounds, true);
     return bounds;

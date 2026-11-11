@@ -1,33 +1,24 @@
-import {isSpeechSupported} from './speech';
-
 /**
- * How the user enters text inside an immersive session, where DOM inputs are
- * not visible:
- *  - 'keyboard': the headset's system keyboard (Meta Quest Browser 26.1+)
- *  - 'voice': Web Speech dictation (not available in Meta Quest Browser)
- *  - 'none': text can only be edited on the 2D screen after the session
+ * The headset's own system keyboard (Meta Quest Browser 26.1+), offered as a
+ * faster alternative to the in-scene keyboard (XRTextEditor) where it exists.
  */
-export type XRTextInputMethod = 'keyboard' | 'voice' | 'none';
 
 interface SystemKeyboardSession {
   isSystemKeyboardSupported?: boolean;
 }
 
-export function pickTextInputMethod(
-  session: XRSession | null,
-): XRTextInputMethod {
-  if ((session as SystemKeyboardSession | null)?.isSystemKeyboardSupported) {
-    return 'keyboard';
-  }
-  return isSpeechSupported() ? 'voice' : 'none';
+export function isSystemKeyboardSupported(session: XRSession | null): boolean {
+  return Boolean(
+    (session as SystemKeyboardSession | null)?.isSystemKeyboardSupported,
+  );
 }
 
 /**
  * Opens the system keyboard by focusing a hidden text field (Meta's WebXR
  * system keyboard contract). `onInput` sees every edit; `onDone` receives the
  * final text when the keyboard is dismissed (Done, hide, or a click outside).
- * Each opening is a fresh edit: the first key press replaces the whole value.
  *
+ * Must be called from a user gesture (the session's native `select` event).
  * Returns a cancel function (removes the field without calling `onDone`), or
  * null when the browser refused to focus the field, so no keyboard opened.
  */
@@ -65,5 +56,7 @@ export function editWithSystemKeyboard(
     finish(false);
     return null;
   }
+  // Caret at the end, so typing continues the text instead of replacing it.
+  field.setSelectionRange(initial.length, initial.length);
   return () => finish(false);
 }

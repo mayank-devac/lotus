@@ -25,9 +25,13 @@ That was the bug. In the headset, text could only be entered by voice. Quest Bro
 - Clearing the title and pressing Done keeps the old title.
 - The hidden text box is removed when the session ends.
 
+## Update: in-scene keyboard
+
+Text entry no longer depends on the Quest keyboard or on voice. Every text field (pin title, note and place; task title, due and note) opens an in-scene keyboard ([XRTextEditor.ts](src/XRTextEditor.ts)) that works in every headset and emulator. The Quest keyboard and voice input are now extra keys on it, shown only where the device supports them. The three-method table above describes the earlier design.
+
 ## Still 2D-only (resolved)
 These now work in the headset:
-- **Tasks**: the list button on the control panel opens a Tasks drawer; pinch a task to mark it done or not done. Creating a task still happens on the 2D screen.
+- **Tasks**: the list button on the control panel opens a Tasks drawer. Tick a task, open it to run its timer, place a pin for it, edit or delete it, and create tasks and reminders with "New task".
 - **Pin list**: the pins drawer lists every pin, nearest first, with its distance. Pinch one to open its card.
 - **Settings**: focus length (5-minute steps), sound, when pin titles show, and how much the room dims while focusing.
 - **Pin colour and style**: the pin card has a colour button (cycles the same palette as the 2D screen) and a shape button (shape or dot).

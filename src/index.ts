@@ -206,18 +206,18 @@ class LotusSpatialApp extends xb.Script {
       setMode: (mode) => this.setMode(mode),
       getPins: () => this.pins,
       commitPins: (pins) => this.commitPins(pins),
-      getTasks: () => this.tasks,
+      // The UI's list is the live one: it counts task timers down in place.
+      getTasks: () => this.ui.getTasks(),
       commitTasks: (tasks) => this.commitTasks(tasks),
-      createPinAt: (hit) => this.createPinAt(hit),
+      createPinAt: (hit, content) => this.createPinAt(hit, content),
       raycastSpatialPoint: (raycaster, fallbackDistance) =>
         this.raycastSpatialPoint(raycaster, fallbackDistance),
+      getFocusZone: () => this.focusZone,
       focusZoneNeedsDefining: () => isDefaultFocusZone(this.focusZone),
-      dragFocusZone: (start, end) => {
-        this.focusZone = this.focusVolume.setBoundsFromDrag(
-          start,
-          end,
-          'Focus Area',
-        );
+      previewFocusZone: (zone) => {
+        this.focusZone = zone;
+        this.focusVolume.setBounds(zone);
+        this.syncFocusVisuals();
       },
       commitFocusZone: () => {
         // The zone is now defined in 3D; a stale 2D screen rectangle would
@@ -359,11 +359,15 @@ class LotusSpatialApp extends xb.Script {
   private syncFocusVisuals() {
     const running = this.ui.getIsTimerRunning();
     const presenting = this.isXRPresenting();
+    // In a headset the made-up default zone is an arbitrary spot in the room,
+    // so its frame only shows once the user has marked out a real one.
+    const showFrame = presenting
+      ? !isDefaultFocusZone(this.focusZone)
+      : this.settings.showVirtualRoom;
     this.focusVolume.setFocusTimerState(
       running && this.settings.showVirtualRoom,
       this.settings.shieldStyle,
-      this.mode === 'focus-drag' &&
-        (this.settings.showVirtualRoom || presenting),
+      this.mode === 'focus-drag' && showFrame,
     );
     this.focusVolume.setXRDim(
       presenting && running && !isDefaultFocusZone(this.focusZone),
@@ -372,13 +376,20 @@ class LotusSpatialApp extends xb.Script {
     );
   }
 
-  /** Creates a pin at a ray hit (headset placement; text is added by voice). */
-  private createPinAt(hit: SpatialHit): SpatialPin {
+  /**
+   * Creates a pin at a ray hit (headset placement). `content` supplies its
+   * text, e.g. from a task; otherwise it gets a default name to edit.
+   */
+  private createPinAt(
+    hit: SpatialHit,
+    content?: Pick<SpatialPin, 'title' | 'body' | 'surfaceLabel'>,
+  ): SpatialPin {
     const pin: SpatialPin = {
       id: `pin-${Date.now()}`,
       title: `Pin ${this.pins.length + 1}`,
-      body: `Dropped on ${hit.surfaceLabel}.`,
+      body: '',
       surfaceLabel: hit.surfaceLabel,
+      ...content,
       color: this.settings.defaultPinColor || '#E84D2B',
       shapeStyle: this.settings.defaultPinStyle,
       position: hit.point,

@@ -47,6 +47,12 @@ export const ICON_PATHS = {
   shapeDot: 'M12 7a5 5 0 1 0 0 10a5 5 0 1 0 0-10z',
   soundOn: 'M4 9h4l5-4v14l-5-4H4zM16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12',
   soundOff: 'M4 9h4l5-4v14l-5-4H4zM17 9.5l5 5M22 9.5l-5 5',
+  edit: 'M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4',
+  grip: 'M5 9h14M5 15h14',
+  backspace: 'M9 5h11a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H9l-6-7zM12 9.5l5 5M17 9.5l-5 5',
+  shift: 'M12 4l8 9h-4.5v7h-7v-7H4z',
+  pause: 'M8 5v14M16 5v14',
+  timer: 'M12 8a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13zM12 11v3.5l2.5 1.5M9.5 3h5M12 3v5',
 } as const;
 
 export type IconName = keyof typeof ICON_PATHS;
