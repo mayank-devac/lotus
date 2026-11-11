@@ -9,7 +9,6 @@ import {LotusUI} from './LotusUI';
 import {ImmersiveSession} from './ImmersiveSession';
 import {PinManager3D} from './PinManager3D';
 import {StudyRoomBuilder} from './StudyRoomBuilder';
-import {IS_STANDALONE_HEADSET} from './device';
 import {lotusSound} from './sound';
 import {
   DEFAULT_FOCUS_ZONE,
@@ -156,11 +155,7 @@ class LotusSpatialApp extends xb.Script {
           style,
         );
       },
-      onSaveTasks: (updatedTasks) => {
-        this.tasks = [...updatedTasks];
-        saveTasksToStorage(this.tasks);
-        this.ui.setTasks(this.tasks);
-      },
+      onSaveTasks: (updatedTasks) => this.commitTasks(updatedTasks),
       onHoverPin: (pinId) => {
         this.pinManager.setHoveredPin(pinId);
       },
@@ -211,6 +206,8 @@ class LotusSpatialApp extends xb.Script {
       setMode: (mode) => this.setMode(mode),
       getPins: () => this.pins,
       commitPins: (pins) => this.commitPins(pins),
+      getTasks: () => this.tasks,
+      commitTasks: (tasks) => this.commitTasks(tasks),
       createPinAt: (hit) => this.createPinAt(hit),
       raycastSpatialPoint: (raycaster, fallbackDistance) =>
         this.raycastSpatialPoint(raycaster, fallbackDistance),
@@ -244,6 +241,13 @@ class LotusSpatialApp extends xb.Script {
     savePinsToStorage(pins);
     this.pinManager.syncPins(pins, defaultPinStyle);
     this.ui.setPins(pins);
+  }
+
+  /** Replaces the task list everywhere: storage and the DOM UI. */
+  private commitTasks(tasks: LotusTask[]) {
+    this.tasks = [...tasks];
+    saveTasksToStorage(this.tasks);
+    this.ui.setTasks(this.tasks);
   }
 
   private setMode(mode: AppMode) {
@@ -304,8 +308,9 @@ class LotusSpatialApp extends xb.Script {
       // top of the emulator's toolbar, gizmos and controller panels and swallow
       // every click, so drop them until the session ends.
       renderer.domElement.classList.remove('lotus-canvas');
-      // Emulators present the session in their own full-page layer; lift the
-      // DOM UI above it so the dock, panels and modals stay usable.
+      // The in-headset panels are the whole UI during a session. A headset
+      // never shows the page; desktop emulators do, so hide the 2D layer
+      // there too rather than show duplicate controls over the scene.
       document.body.classList.add('lotus-xr-active');
       this.cameraGate?.onSessionStart();
       this.cameraPassthrough.stopCamera();
@@ -795,7 +800,7 @@ class LotusSpatialApp extends xb.Script {
     // positions this frame.
     const referenceSpace = renderer?.xr?.getReferenceSpace();
     if (frame && referenceSpace) {
-      this.immersive.updateAnchor(frame, referenceSpace);
+      this.immersive.updateFrame(frame, referenceSpace);
     }
 
     if (this.isGlidingCamera) {
@@ -870,11 +875,9 @@ class LotusSpatialApp extends xb.Script {
 
     this.immersive.update(camera, delta, elapsed, pinProjections);
 
-    // A standalone headset never shows the DOM during a session, so skip
-    // rewriting the 2D pin markers and focus shield every frame. Desktop XR
-    // emulators do show it, so they keep the 2D layer alive.
-    const domVisible = !IS_STANDALONE_HEADSET || !this.isXRPresenting();
-    if (domVisible) {
+    // During a session the in-headset panels are the whole UI and the 2D
+    // layer is hidden (see `lotus-xr-active`), so skip rewriting it per frame.
+    if (!this.isXRPresenting()) {
       const focusRect = this.focusVolume.projectFocusWindow(camera, vw, vh);
       this.ui.updateFrameProjections(pinProjections, focusRect, {
         x: camera.position.x,

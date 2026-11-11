@@ -22,6 +22,16 @@ const _camWorldQuat = new THREE.Quaternion();
  */
 const PIN_FULL_SIZE_DISTANCE = 1.5;
 const MAX_PIN_DISTANCE_SCALE = 10;
+/** Radius of a pin's ray target at full size (grows with the pin's scale). */
+const PIN_HIT_RADIUS = 0.14;
+/**
+ * A pin under the ray stays targeted until the ray is this much further out,
+ * so hand jitter and head motion (which moves both the hand ray and the pin's
+ * distance-based size) cannot toggle hover on and off at the edge.
+ */
+const PIN_HIT_KEEP_FACTOR = 1.6;
+/** Leaving the proximity radius needs this much extra distance (m). */
+const PROXIMITY_EXIT_MARGIN = 0.15;
 
 interface PinNode {
   pin: SpatialPin;
@@ -33,6 +43,8 @@ interface PinNode {
   dotMesh: THREE.Mesh;
   hoverRingMesh: THREE.Mesh;
   clickRippleMesh: THREE.Mesh;
+  /** This pin's own materials, disposed when the pin is removed. */
+  materials: THREE.Material[];
   wasWithinProximity: boolean;
   proximityLerp: number;
   hoverLerp: number;
@@ -76,7 +88,9 @@ export class PinManager3D {
     this.rippleRingGeo = this.trackGeo(
       new THREE.RingGeometry(0.045, 0.056, 32),
     );
-    this.hitGeo = this.trackGeo(new THREE.SphereGeometry(0.14, 16, 16));
+    this.hitGeo = this.trackGeo(
+      new THREE.SphereGeometry(PIN_HIT_RADIUS, 16, 16),
+    );
 
     this.previewMarker = this.createPreviewMarker();
     this.root.add(this.previewMarker);
@@ -122,6 +136,7 @@ export class PinManager3D {
     for (const [id, node] of this.pinNodes.entries()) {
       if (!incomingIds.has(id)) {
         this.root.remove(node.group);
+        for (const mat of node.materials) mat.dispose();
         this.pinNodes.delete(id);
       }
     }
@@ -179,10 +194,15 @@ export class PinManager3D {
     // position in the same frame fought each other.
 
     const accentColor = new THREE.Color(pin.color || '#E84D2B');
+    const materials: THREE.Material[] = [];
+    const track = <T extends THREE.Material>(mat: T): T => {
+      materials.push(mat);
+      return mat;
+    };
 
     // 1. Revolving 3D Shape (Octahedron + crisp facet edge lines, no floor base or pole)
     const revolvingGroup = new THREE.Group();
-    const coreMat = this.trackMat(
+    const coreMat = track(
       new THREE.MeshStandardMaterial({
         color: accentColor,
         emissive: accentColor,
@@ -194,7 +214,7 @@ export class PinManager3D {
     );
     const revolvingCoreMesh = new THREE.Mesh(this.octaGeo, coreMat);
 
-    const wireMat = this.trackMat(
+    const wireMat = track(
       new THREE.LineBasicMaterial({
         color: 0x1b1b19,
         transparent: true,
@@ -209,7 +229,7 @@ export class PinManager3D {
     revolvingGroup.visible = effectiveStyle === 'revolving';
 
     // 2. Minimalistic 3D Dot (Just a clean floating sphere point)
-    const dotMat = this.trackMat(
+    const dotMat = track(
       new THREE.MeshStandardMaterial({
         color: accentColor,
         emissive: accentColor,
@@ -222,7 +242,7 @@ export class PinManager3D {
     dotMesh.visible = effectiveStyle === 'dot';
 
     // 3. Hover Halo Ring (Invisible when far/idle; fades in only on hover)
-    const hoverRingMat = this.trackMat(
+    const hoverRingMat = track(
       new THREE.MeshBasicMaterial({
         color: accentColor,
         side: THREE.DoubleSide,
@@ -234,7 +254,7 @@ export class PinManager3D {
     const hoverRingMesh = new THREE.Mesh(this.hoverRingGeo, hoverRingMat);
 
     // 4. Click Shockwave Ripple Ring (Bursts outward on click)
-    const rippleMat = this.trackMat(
+    const rippleMat = track(
       new THREE.MeshBasicMaterial({
         color: accentColor,
         side: THREE.DoubleSide,
@@ -246,7 +266,7 @@ export class PinManager3D {
     const clickRippleMesh = new THREE.Mesh(this.rippleRingGeo, rippleMat);
 
     // 5. Generous invisible hit sphere centered directly on the 3D point
-    const hitMat = this.trackMat(
+    const hitMat = track(
       new THREE.MeshBasicMaterial({
         transparent: true,
         opacity: 0,
@@ -277,6 +297,7 @@ export class PinManager3D {
       dotMesh,
       hoverRingMesh,
       clickRippleMesh,
+      materials,
       wasWithinProximity: false,
       proximityLerp: 0,
       hoverLerp: 0,
@@ -292,6 +313,31 @@ export class PinManager3D {
       list.push(node.hitMesh);
     }
     return list;
+  }
+
+  /**
+   * The pin nearest along `ray` whose (scaled) target sphere the ray passes
+   * through. `stickyPinId` is the pin hovered last frame: its sphere is
+   * enlarged by PIN_HIT_KEEP_FACTOR so hover holds steady at the edge.
+   * Uses world positions, so it works while the room anchor moves the root.
+   */
+  public pickPin(
+    ray: THREE.Ray,
+    stickyPinId: string | null,
+  ): {pinId: string; distance: number} | null {
+    let best: {pinId: string; distance: number} | null = null;
+    for (const [id, node] of this.pinNodes) {
+      node.group.getWorldPosition(_pinCenterPos);
+      const along = _projectedPos.copy(_pinCenterPos).sub(ray.origin).dot(ray.direction);
+      if (along <= 0) continue;
+      const radius =
+        PIN_HIT_RADIUS *
+        node.group.scale.x *
+        (id === stickyPinId ? PIN_HIT_KEEP_FACTOR : 1);
+      if (ray.distanceSqToPoint(_pinCenterPos) > radius * radius) continue;
+      if (!best || along < best.distance) best = {pinId: id, distance: along};
+    }
+    return best;
   }
 
   /** World-space centre of a pin (the root may be moved by the room anchor). */
@@ -390,7 +436,11 @@ export class PinManager3D {
 
       _pinCenterPos.copy(node.group.position).applyMatrix4(this.root.matrixWorld);
       const dist = _camWorldPos.distanceTo(_pinCenterPos);
-      const withinRadius = dist <= proximityDistanceMeters;
+      // Hysteresis: standing right at the radius (or swaying around it) must
+      // not pop the header in and out.
+      const withinRadius = node.wasWithinProximity
+        ? dist <= proximityDistanceMeters + PROXIMITY_EXIT_MARGIN
+        : dist <= proximityDistanceMeters;
 
       // Minimum on-screen size (room-space scale: the root carries no scale).
       node.group.scale.setScalar(
@@ -512,5 +562,9 @@ export class PinManager3D {
   public dispose() {
     for (const geo of this.sharedGeos) geo.dispose();
     for (const mat of this.materials) mat.dispose();
+    for (const node of this.pinNodes.values()) {
+      for (const mat of node.materials) mat.dispose();
+    }
+    this.pinNodes.clear();
   }
 }

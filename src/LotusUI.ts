@@ -1019,31 +1019,41 @@ export class LotusUI {
       window.clearInterval(this.timerIntervalId);
     }
 
+    // Count from the wall clock, not from ticks: browsers throttle intervals
+    // (background tabs, busy XR frames), and a tick-counted timer then runs slow.
+    const startedAt = Date.now();
+    const startRemaining = this.timerRemainingSec;
+    const startElapsed = this.timerElapsedSec;
     this.timerIntervalId = window.setInterval(() => {
+      const passedSec = Math.floor((Date.now() - startedAt) / 1000);
       if (this.settings.timerMode === 'stopwatch') {
-        this.timerElapsedSec += 1;
+        this.timerElapsedSec = startElapsed + passedSec;
       } else {
-        this.timerRemainingSec = Math.max(0, this.timerRemainingSec - 1);
+        this.timerRemainingSec = Math.max(0, startRemaining - passedSec);
         if (this.timerRemainingSec === 0) {
-          lotusSound.playTimerComplete();
-          this.stopFocusTimer();
+          this.stopFocusTimer(true);
           return;
         }
       }
       this.updateTimerReadoutsOnly();
-    }, 1000);
+    }, 250);
 
     this.renderAllPanels();
   }
 
-  public stopFocusTimer() {
+  /** `completed` is true when a countdown ran out (plays the completion chime only). */
+  public stopFocusTimer(completed = false) {
     if (!this.isTimerRunning && this.timerIntervalId === null) return;
     this.isTimerRunning = false;
     if (this.timerIntervalId !== null) {
       window.clearInterval(this.timerIntervalId);
       this.timerIntervalId = null;
     }
-    lotusSound.playFocusStop();
+    if (completed) {
+      lotusSound.playTimerComplete();
+    } else {
+      lotusSound.playFocusStop();
+    }
     this.callbacks.onTimerStateChange(false);
     this.apertureRootEl.style.display = 'none';
     this.renderAllPanels();
@@ -3692,6 +3702,28 @@ export class LotusUI {
       this.isPinDirectoryOpen ||
       Boolean(this.inspectedPinId)
     );
+  }
+
+  public getSettings(): Readonly<LotusSettings> {
+    return this.settings;
+  }
+
+  /**
+   * Settings changed outside the 2D settings screen (the in-headset drawer).
+   * Goes through the same path as the screen: storage, 3D scene, re-render.
+   */
+  public applySettings(patch: Partial<LotusSettings>) {
+    Object.assign(this.settings, patch);
+    const timerChanged =
+      'timerMode' in patch ||
+      'presetMinutes' in patch ||
+      'customMinutes' in patch ||
+      'customSeconds' in patch;
+    if (timerChanged && !this.isTimerRunning) {
+      this.resetTimerClockFromSettings();
+    }
+    this.callbacks.onSettingsChange(this.settings);
+    this.renderAllPanels();
   }
 
   public getIsTimerRunning(): boolean {
