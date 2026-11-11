@@ -10,7 +10,6 @@ import {
   RestingSpot,
   TEXT_DIM,
   TEXT_MAIN,
-  bearingFromGaze,
   fitText,
   restingPosition,
   roundRectPath,
@@ -32,15 +31,19 @@ import {XRSettingId} from './xrSettings';
  * In-headset interface. The DOM overlay (LotusUI) is not composited into an
  * immersive session, so everything the user needs while wearing the headset is
  * drawn here as canvas-textured panels in the 3D scene:
- *  - a control panel that stays where it is in the room and only comes back,
- *    off to one side, once the user has turned or walked away from it. Its
- *    grip moves it by hand. Hidden, it shrinks to a small chip.
+ *  - a control panel that stays where it is in the room: it never follows the
+ *    user. Its grip moves it by hand; hiding and showing it again (chip, B/Y,
+ *    palm-up pinch) brings it back beside the user. Hidden, it shrinks to a
+ *    small chip.
  *  - a drawer above the control panel: tasks (list, one task, the new / edit
  *    form), the pin list, or settings
  *  - a card for an opened pin, held at a readable distance between the user
  *    and the pin, with a leader line to the pin
  *  - a confirm / cancel bar on the focus area while it is being set
- *  - the keyboard (XRTextEditor), which takes over all input while open
+ *  - the keyboard (XRTextEditor). While it is open the other panels still
+ *    work; only pins and the room ignore pinches.
+ * The control panel (with its drawer), the pin card and the keyboard each
+ * have a grip button in their top-right corner that moves them.
  *  - a title label above pins that are hovered or within proximity
  *  - a ray and cursor dot per controller / hand so the user can see where they aim
  *
@@ -58,11 +61,16 @@ export type XRHudAction =
   | 'tab-settings'
   | 'hide-hud'
   | 'move-hud'
-  | 'exit-xr';
+  | 'exit-xr'
+  // The "Start how?" choice that replaces the buttons after Play.
+  | 'start-timer-only'
+  | 'start-with-area'
+  | 'start-cancel';
 export type XRChipAction = 'show-hud';
 export type XRZoneAction = 'zone-confirm' | 'zone-cancel';
 export type XRDrawerTab = 'tasks' | 'pins' | 'settings';
 export type XRDrawerAction =
+  | 'move-drawer'
   | 'page-prev'
   | 'page-next'
   // Task list
@@ -92,6 +100,7 @@ export type XRDrawerAction =
   | 'pin-sort'
   | `setting:${XRSettingId}:${'prev' | 'next'}`;
 export type XRCardAction =
+  | 'move-card'
   | 'close'
   | 'edit'
   | 'edit-done'
@@ -109,7 +118,12 @@ export interface XRHudState {
   mode: AppMode;
   /** What to do next, shown when no button is hovered and nothing was flashed. */
   hint: string;
+  /** Play was pressed: show the timer-only / focus-area choice instead of the buttons. */
+  askingStart: boolean;
 }
+
+/** The panels a grip can move. The drawer moves with the control panel. */
+export type XRMovablePanel = 'hud' | 'card' | 'editor';
 
 export type XRTaskFilter = 'all' | 'ongoing' | 'completed';
 
@@ -190,20 +204,12 @@ const HUD_SCALE = HUD_DISTANCE / REFERENCE_DISTANCE;
 const HUD_DROP_RADIANS = 0.25;
 /** The panel rests ~24° to one side of where the user faces, never dead ahead. */
 const HUD_SIDE_RADIANS = 0.42;
-/**
- * The panel is world-locked. It counts as lost, and comes back to the user's
- * side, only once it is this far (radians) from where they face, or outside
- * this distance / height range. Ordinary head movement never reaches these.
- */
-const HUD_LOST_BEARING = 1.15;
-const HUD_LOST_NEAR = 0.45;
-const HUD_LOST_FAR = 2.0;
-const HUD_LOST_ABOVE = 0.35;
-const HUD_LOST_BELOW = 1.1;
-/** It must stay lost this long (s) first, so a glance away does not move it. */
-const HUD_RETURN_DELAY = 0.7;
-/** Lost further round than this (radians) it is behind the user: appear, don't fly past them. */
-const HUD_BEHIND_BEARING = 1.9;
+/** Where the panel appears when shown: to the user's left, below eye level. */
+const HUD_SPOT: RestingSpot = {
+  distance: HUD_DISTANCE,
+  drop: HUD_DROP_RADIANS,
+  yaw: HUD_SIDE_RADIANS,
+};
 
 /**
  * The pin card sits between the user and the pin, within this range, so a
@@ -287,6 +293,7 @@ export class XRInterface {
     timerRunning: false,
     mode: 'explore',
     hint: '',
+    askingStart: false,
   };
   private hudStatus = '';
   private flashText = '';
@@ -295,11 +302,6 @@ export class XRInterface {
   private chipKey = '';
   private hudHidden = false;
   private hudNeedsSnap = true;
-  /** Which side the panel rests on: 1 is the user's left, −1 their right. */
-  private hudSide: 1 | -1 = 1;
-  private hudLostFor = 0;
-  private hudReturning = false;
-  private hudHome = new THREE.Vector3();
 
   // Drawer above the control panel.
   private drawer = new CanvasPanel<XRDrawerAction>(0.36, 0.34, 720, 680);
@@ -315,7 +317,8 @@ export class XRInterface {
   private cardStatus = '';
   private cardDeleteArmed = false;
   private cardNeedsSnap = true;
-  private cardFollowing = false;
+  /** The user moved the card by its grip: it stays exactly there. */
+  private cardPlaced = false;
   private leaderGeo: THREE.BufferGeometry;
   private leaderMat: THREE.LineBasicMaterial;
   private leader: THREE.Line;
@@ -423,7 +426,6 @@ export class XRInterface {
     this.flashText = '';
     if (active) {
       this.hudNeedsSnap = true;
-      this.hudSide = 1;
       this.setHudHidden(false);
     } else {
       this.editor.close();
@@ -454,7 +456,8 @@ export class XRInterface {
 
   /**
    * Hidden, the panel turns into a small chip left exactly where the panel
-   * was. Shown again, the panel appears beside where the user is facing.
+   * was. Shown again, the panel appears beside where the user is facing:
+   * that is how a panel left behind in the room is brought back.
    */
   public setHudHidden(hidden: boolean) {
     if (this.hudHidden === hidden) return;
@@ -472,24 +475,38 @@ export class XRInterface {
     }
   }
 
-  public getHudPosition(out: THREE.Vector3): THREE.Vector3 {
-    return out.copy(this.hud.mesh.position);
+  /** Where a movable panel's centre is, in world space. */
+  public getPanelPosition(panel: XRMovablePanel, out: THREE.Vector3): THREE.Vector3 {
+    switch (panel) {
+      case 'hud':
+        return out.copy(this.hud.mesh.position);
+      case 'card':
+        return out.copy(this.card.mesh.position);
+      case 'editor':
+        return out.copy(this.editor.panel.mesh.position);
+    }
   }
 
-  /** Puts the panel where the user dragged it; it stays there. */
-  public setHudPosition(position: THREE.Vector3) {
-    this.hud.mesh.position.copy(position);
-    this.hudNeedsSnap = false;
-    this.hudReturning = false;
-    this.hudLostFor = 0;
+  /** Puts a panel where the user dragged it by its grip; it stays there. */
+  public setPanelPosition(panel: XRMovablePanel, position: THREE.Vector3) {
+    switch (panel) {
+      case 'hud':
+        this.hud.mesh.position.copy(position);
+        this.hudNeedsSnap = false;
+        return;
+      case 'card':
+        this.card.mesh.position.copy(position);
+        this.cardNeedsSnap = false;
+        this.cardPlaced = true;
+        return;
+      case 'editor':
+        this.editor.setPosition(position);
+        return;
+    }
   }
 
-  /**
-   * Redraws the control panel when its content changed and keeps it placed.
-   * `held` is true while the panel must not move by itself: the user is
-   * dragging it or typing.
-   */
-  public updateHud(state: XRHudState, camera: THREE.Camera, delta: number, held: boolean) {
+  /** Redraws the control panel when its content changed and keeps it facing the user. */
+  public updateHud(state: XRHudState, camera: THREE.Camera) {
     camera.getWorldPosition(_camPos);
 
     if (this.hudHidden) {
@@ -508,7 +525,7 @@ export class XRInterface {
       this.hud.hoveredLabel() ??
       this.drawer.hoveredLabel() ??
       (this.flashText && performance.now() < this.flashUntil ? this.flashText : state.hint);
-    const key = `${state.clock}|${state.timerRunning}|${state.mode}|${status}|${this.hud.hoverKey()}|${this.drawerTab}`;
+    const key = `${state.clock}|${state.timerRunning}|${state.mode}|${state.askingStart}|${status}|${this.hud.hoverKey()}|${this.drawerTab}`;
     if (key !== this.hudKey) {
       this.hudKey = key;
       this.hudState = state;
@@ -516,66 +533,21 @@ export class XRInterface {
       this.drawHud();
     }
 
-    this.placeHud(camera, delta, held || this.hud.isHovered() || this.drawer.isHovered());
+    this.placeHud(camera);
     this.hud.mesh.lookAt(_camPos);
   }
 
   /**
-   * The panel stays where it is in the room. Only when the user has turned or
-   * walked away from it for a moment does it glide back, to the side it was
-   * last on, and stop there. It never chases the head.
+   * World-locked: the panel is placed beside the user when it is shown and
+   * then stays put. It never follows the head or the user; only its grip, or
+   * hiding and showing it again, moves it.
    */
-  private placeHud(camera: THREE.Camera, delta: number, held: boolean) {
+  private placeHud(camera: THREE.Camera) {
     const mesh = this.hud.mesh;
     mesh.scale.setScalar(HUD_SCALE);
-    if (this.hudNeedsSnap) {
-      if (restingPosition(camera, this.hudSpot(), mesh.position)) {
-        this.hudNeedsSnap = false;
-        this.hudReturning = false;
-        this.hudLostFor = 0;
-      }
-      return;
+    if (this.hudNeedsSnap && restingPosition(camera, HUD_SPOT, mesh.position)) {
+      this.hudNeedsSnap = false;
     }
-    if (held) {
-      // Never move the panel out from under a ray that is using it.
-      this.hudReturning = false;
-      this.hudLostFor = 0;
-      return;
-    }
-    if (this.hudReturning) {
-      mesh.position.lerp(this.hudHome, 1 - Math.exp(-6 * delta));
-      if (mesh.position.distanceTo(this.hudHome) < 0.02) this.hudReturning = false;
-      return;
-    }
-
-    const bearing = bearingFromGaze(camera, mesh.position);
-    const away = Math.hypot(mesh.position.x - _camPos.x, mesh.position.z - _camPos.z);
-    const above = mesh.position.y - _camPos.y;
-    const lost =
-      Math.abs(bearing) > HUD_LOST_BEARING ||
-      away < HUD_LOST_NEAR ||
-      away > HUD_LOST_FAR ||
-      above > HUD_LOST_ABOVE ||
-      above < -HUD_LOST_BELOW;
-    this.hudLostFor = lost ? this.hudLostFor + delta : 0;
-    if (this.hudLostFor < HUD_RETURN_DELAY) return;
-
-    this.hudLostFor = 0;
-    this.hudSide = bearing >= 0 ? 1 : -1;
-    if (!restingPosition(camera, this.hudSpot(), this.hudHome)) return;
-    if (Math.abs(bearing) > HUD_BEHIND_BEARING) {
-      mesh.position.copy(this.hudHome);
-    } else {
-      this.hudReturning = true;
-    }
-  }
-
-  private hudSpot(): RestingSpot {
-    return {
-      distance: HUD_DISTANCE,
-      drop: HUD_DROP_RADIANS,
-      yaw: HUD_SIDE_RADIANS * this.hudSide,
-    };
   }
 
   private drawHud() {
@@ -601,6 +573,25 @@ export class XRInterface {
 
     const y = 214;
     const h = 116;
+    if (s.askingStart) {
+      hud.drawButton(
+        'start-timer-only',
+        'Just run the timer; the room stays clear',
+        {text: 'Timer only'},
+        30, y, 252, h,
+        {active: true, fontSize: 34},
+      );
+      hud.drawButton(
+        'start-with-area',
+        'Dim everything outside your focus area',
+        {text: 'Focus area'},
+        294, y, 252, h,
+        {fontSize: 34},
+      );
+      hud.drawButton('start-cancel', 'Do not start', {icon: 'close'}, 558, y, 132, h);
+      hud.commit();
+      return;
+    }
     const w = 84;
     const gap = 12;
     let x = 30;
@@ -747,6 +738,7 @@ export class XRInterface {
     const {drawer} = this;
     drawer.clear();
     drawer.drawBackground();
+    drawer.drawButton('move-drawer', 'Pinch and drag to move this panel', {icon: 'grip'}, 624, 22, 72, 64);
     if (tab === 'settings') {
       this.drawSettings(data.settings);
     } else if (tab === 'pins') {
@@ -781,12 +773,12 @@ export class XRInterface {
       ctx.fillStyle = TEXT_DIM;
       ctx.font = `500 26px ${FONT_BODY}`;
       ctx.textAlign = 'right';
-      ctx.fillText(`${this.drawerPage + 1} / ${pages}`, 520, 62);
+      ctx.fillText(`${this.drawerPage + 1} / ${pages}`, 436, 62);
       ctx.textAlign = 'left';
-      drawer.drawButton('page-prev', 'Previous page', {icon: 'chevronLeft'}, 540, 22, 72, 64, {
+      drawer.drawButton('page-prev', 'Previous page', {icon: 'chevronLeft'}, 456, 22, 72, 64, {
         disabled: this.drawerPage === 0,
       });
-      drawer.drawButton('page-next', 'Next page', {icon: 'chevronRight'}, 624, 22, 72, 64, {
+      drawer.drawButton('page-next', 'Next page', {icon: 'chevronRight'}, 540, 22, 72, 64, {
         disabled: this.drawerPage === pages - 1,
       });
     }
@@ -1110,7 +1102,10 @@ export class XRInterface {
   // ---------------------------------------------------------------------------
 
   public openCard(pin: SpatialPin) {
-    if (this.cardPin?.id !== pin.id) this.cardNeedsSnap = true;
+    if (this.cardPin?.id !== pin.id) {
+      this.cardNeedsSnap = true;
+      this.cardPlaced = false;
+    }
     this.cardPin = pin;
     this.cardEditing = false;
     this.cardStatus = '';
@@ -1192,11 +1187,10 @@ export class XRInterface {
     if (this.cardNeedsSnap) {
       mesh.position.copy(_target);
       this.cardNeedsSnap = false;
-      this.cardFollowing = false;
     }
-    // The card stays where it opened; it never chases the head.
-    this.cardFollowing = false;
-    if (held) {
+    // The card stays where it opened; it never chases the head. A card the
+    // user moved by its grip is left exactly where they put it.
+    if (held && !this.cardPlaced) {
       // While typing, keep the card above the keyboard (which rests below eye
       // level) so a pin near the floor does not put them on top of each other.
       const minY = _camPos.y - CARD_ABOVE_KEYBOARD + halfH;
@@ -1224,6 +1218,7 @@ export class XRInterface {
     const {card} = this;
     card.clear();
     card.drawBackground();
+    card.drawButton('move-card', 'Pinch and drag to move this card', {icon: 'grip'}, 612, 20, 72, 64);
     if (this.cardEditing) {
       this.drawCardFields(pin);
     } else {
@@ -1253,14 +1248,15 @@ export class XRInterface {
 
     ctx.fillStyle = pin.completed ? TEXT_DIM : TEXT_MAIN;
     ctx.font = `700 44px ${FONT_BODY}`;
-    const titleLines = wrapLines(ctx, pin.title || 'Untitled pin', 620, 2);
+    // Narrower than the card: the grip sits in the top-right corner.
+    const titleLines = wrapLines(ctx, pin.title || 'Untitled pin', 530, 2);
     titleLines.forEach((line, i) => ctx.fillText(line, 66, 82 + i * 52));
 
     let y = 82 + titleLines.length * 52;
     ctx.fillStyle = TEXT_DIM;
     ctx.font = `500 26px ${FONT_BODY}`;
     const place = pin.surfaceLabel || 'Room';
-    ctx.fillText(fitText(ctx, pin.completed ? `Done · ${place}` : place, 620), 66, y - 6);
+    ctx.fillText(fitText(ctx, pin.completed ? `Done · ${place}` : place, 530), 66, y - 6);
     y += 46;
 
     ctx.fillStyle = TEXT_MAIN;
@@ -1395,15 +1391,8 @@ export class XRInterface {
   // Ray hit testing and hover
   // ---------------------------------------------------------------------------
 
-  /**
-   * Nearest panel under the ray, with the button it lands on (if any). While
-   * the keyboard is open it is the only panel that responds.
-   */
+  /** Nearest panel under the ray, with the button it lands on (if any). */
   public hitTest(raycaster: THREE.Raycaster): XRPanelHit | null {
-    if (this.editor.isOpen()) {
-      const hit = this.editor.panel.hit(raycaster);
-      return hit && {panel: 'editor', distance: hit.distance, action: hit.buttonId};
-    }
     let best: XRPanelHit | null = null;
     const consider = (hit: XRPanelHit | null) => {
       if (hit && (!best || hit.distance < best.distance)) best = hit;
@@ -1418,6 +1407,10 @@ export class XRInterface {
     if (card) consider({panel: 'card', distance: card.distance, action: card.buttonId});
     const zone = this.zoneBar.hit(raycaster);
     if (zone) consider({panel: 'zone', distance: zone.distance, action: zone.buttonId});
+    if (this.editor.isOpen()) {
+      const editor = this.editor.panel.hit(raycaster);
+      if (editor) consider({panel: 'editor', distance: editor.distance, action: editor.buttonId});
+    }
     return best;
   }
 

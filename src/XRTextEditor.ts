@@ -31,7 +31,9 @@ export type XRKeyAction =
   | 'voice'
   | 'system-keyboard'
   | 'cancel'
-  | 'done';
+  | 'done'
+  /** The grip: a drag on it moves the keyboard. */
+  | 'move';
 
 export interface XRTextRequest {
   /** Names the field being edited, e.g. "Pin title". */
@@ -71,8 +73,6 @@ const WIDE_KEY_W = (PX_WIDTH - MARGIN * 2 - KEY_W * 7 - KEY_GAP * 8) / 2;
  * panel being edited. Closer than the other panels: the keys are small targets.
  */
 const EDITOR_SPOT: RestingSpot = {distance: 0.8, drop: 0.5, yaw: 0};
-/** The keyboard only moves once the user has clearly walked or turned away. */
-const FOLLOW_START = 0.6;
 
 const _target = new THREE.Vector3();
 const _camPos = new THREE.Vector3();
@@ -88,13 +88,17 @@ export class XRTextEditor {
   private listening = false;
   private dirty = false;
   private needsSnap = true;
-  private following = false;
 
   public isOpen(): boolean {
     return this.request !== null;
   }
 
+  /**
+   * Opens the keyboard for `request`. Already open (the user moved on to
+   * another field), it stays where it is.
+   */
   public open(request: XRTextRequest, options: XRTextInputOptions) {
+    if (!this.request) this.needsSnap = true;
     this.request = request;
     this.options = options;
     this.text = request.initial;
@@ -102,7 +106,6 @@ export class XRTextEditor {
     this.symbols = false;
     this.status = '';
     this.listening = false;
-    this.needsSnap = true;
     this.dirty = true;
     this.panel.setVisible(true);
   }
@@ -139,9 +142,15 @@ export class XRTextEditor {
     if (this.panel.setHovered(ids)) this.dirty = true;
   }
 
+  /** Puts the keyboard where the user dragged it by its grip; it stays there. */
+  public setPosition(position: THREE.Vector3) {
+    this.panel.mesh.position.copy(position);
+    this.needsSnap = false;
+  }
+
   /**
    * Applies a typing key. Returns false for the keys the owner handles
-   * (voice, system keyboard, cancel, done).
+   * (voice, system keyboard, cancel, done, move).
    */
   public press(action: XRKeyAction): boolean {
     if (action.startsWith('char:')) {
@@ -178,17 +187,16 @@ export class XRTextEditor {
     return this.request?.maxLength ?? DEFAULT_MAX_LENGTH;
   }
 
-  /** Keeps the keyboard in reach and redraws it after a change. */
-  public update(camera: THREE.Camera, delta: number) {
+  /**
+   * Places the keyboard in reach when it opens and redraws it after a change.
+   * After that it stays where it is; it never chases the head.
+   */
+  public update(camera: THREE.Camera) {
     if (!this.request) return;
     const mesh = this.panel.mesh;
-    if (restingPosition(camera, EDITOR_SPOT, _target)) {
-      if (this.needsSnap) {
-        mesh.position.copy(_target);
-        this.needsSnap = false;
-        this.following = false;
-      }
-      // The keyboard stays where it opened; it never chases the head.
+    if (this.needsSnap && restingPosition(camera, EDITOR_SPOT, _target)) {
+      mesh.position.copy(_target);
+      this.needsSnap = false;
     }
     mesh.lookAt(camera.getWorldPosition(_camPos));
     if (this.dirty) {
@@ -212,6 +220,8 @@ export class XRTextEditor {
     ctx.fillStyle = this.status ? ACCENT : TEXT_DIM;
     ctx.font = `600 26px ${FONT_BODY}`;
     ctx.fillText(this.status || request.label, MARGIN + 14, 58);
+    panel.drawButton('move', 'Pinch and drag to move the keyboard', {icon: 'grip'},
+      PX_WIDTH - MARGIN - 106, 10, 106, 58);
 
     this.drawTextField(request);
     panel.drawButton('clear', 'Clear text', {icon: 'close'}, PX_WIDTH - MARGIN - 106, 76, 106, 84);

@@ -1,9 +1,11 @@
 import {
+  FocusStartMode,
   FocusZoneBounds,
   LotusSettings,
   LotusTask,
   RoomWaypoint,
   SpatialPin,
+  TimerMode,
   Vector3Data,
 } from './types';
 
@@ -54,7 +56,8 @@ export const DEFAULT_FOCUS_ZONE: FocusZoneBounds = {
 };
 
 export const DEFAULT_SETTINGS: LotusSettings = {
-  timerMode: 'preset',
+  timerMode: 'stopwatch',
+  focusStart: 'ask',
   presetMinutes: 25,
   customMinutes: 20,
   customSeconds: 0,
@@ -294,6 +297,9 @@ export function saveFocusZoneToStorage(zone: FocusZoneBounds): void {
   }
 }
 
+const TIMER_MODES: TimerMode[] = ['preset', 'custom', 'stopwatch'];
+const FOCUS_START_MODES: FocusStartMode[] = ['ask', 'timer', 'area'];
+
 export function loadLotusSettings(): LotusSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
@@ -307,6 +313,15 @@ export function loadLotusSettings(): LotusSettings {
     }
     const settings = merged as unknown as LotusSettings;
     settings.defaultPinColor = safeColor(settings.defaultPinColor);
+    // Settings saved before `focusStart` existed predate the stopwatch default:
+    // move them to it once. Later saves carry `focusStart`, so a countdown
+    // chosen after this is kept.
+    if (!('focusStart' in parsed) || !TIMER_MODES.includes(settings.timerMode)) {
+      settings.timerMode = DEFAULT_SETTINGS.timerMode;
+    }
+    if (!FOCUS_START_MODES.includes(settings.focusStart)) {
+      settings.focusStart = DEFAULT_SETTINGS.focusStart;
+    }
     return settings;
   } catch {
     return {...DEFAULT_SETTINGS};

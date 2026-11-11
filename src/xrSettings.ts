@@ -1,6 +1,6 @@
 import {PIN_COLOR_OPTIONS} from './LotusUI';
 import {getShieldStrength} from './storage';
-import {LotusSettings, ShieldStyle} from './types';
+import {FocusStartMode, LotusSettings, ShieldStyle} from './types';
 
 /**
  * The settings offered in the headset's Settings drawer. Each entry reads its
@@ -10,6 +10,7 @@ import {LotusSettings, ShieldStyle} from './types';
 
 export type XRSettingId =
   | 'timer-mode'
+  | 'focus-start'
   | 'focus-length'
   | 'dim'
   | 'dim-style'
@@ -42,6 +43,11 @@ const SHIELD_STYLES: {value: ShieldStyle; text: string}[] = [
   {value: 'frosted', text: 'Frosted'},
   {value: 'dark', text: 'Dark'},
   {value: 'ambient', text: 'Warm tint'},
+];
+const FOCUS_START_MODES: {value: FocusStartMode; text: string}[] = [
+  {value: 'ask', text: 'Ask each time'},
+  {value: 'timer', text: 'Timer only'},
+  {value: 'area', text: 'Focus area'},
 ];
 const LABEL_MODES: {value: LabelMode; text: string; patch: Partial<LotusSettings>}[] = [
   {value: 'hover', text: 'When pointed at', patch: {headerPopEnabled: false}},
@@ -97,6 +103,20 @@ export const XR_SETTINGS: XRSettingDef[] = [
     hint: 'Switch between countdown and stopwatch',
     value: (s) => (s.timerMode === 'stopwatch' ? 'Stopwatch' : 'Countdown'),
     step: (s) => ({timerMode: s.timerMode === 'stopwatch' ? 'preset' : 'stopwatch'}),
+  },
+  {
+    id: 'focus-start',
+    name: 'Start focus',
+    kind: 'cycle',
+    hint: 'Choose whether starting focus also dims around the focus area',
+    value: (s) => FOCUS_START_MODES.find((o) => o.value === s.focusStart)?.text ?? 'Ask each time',
+    step: (s, direction) => ({
+      focusStart: cycled(
+        FOCUS_START_MODES,
+        FOCUS_START_MODES.findIndex((o) => o.value === s.focusStart),
+        direction,
+      ).value,
+    }),
   },
   {
     id: 'focus-length',

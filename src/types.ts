@@ -1,4 +1,6 @@
 export type TimerMode = 'preset' | 'custom' | 'stopwatch';
+/** What starting focus does: ask each time, run only the timer, or also dim around the focus area. */
+export type FocusStartMode = 'ask' | 'timer' | 'area';
 export type ShieldStyle = 'frosted' | 'dark' | 'ambient';
 export type AppMode = 'explore' | 'pin-add' | 'focus-drag';
 export type ProximityDisplayMode = 'proximity-2m' | 'always' | 'reticle-only';
@@ -51,6 +53,7 @@ export interface FocusZoneBounds {
 
 export interface LotusSettings {
   timerMode: TimerMode;
+  focusStart: FocusStartMode;
   presetMinutes: number;
   customMinutes: number;
   customSeconds: number;

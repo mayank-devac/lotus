@@ -178,8 +178,8 @@ export class CameraGate {
   }
 
   /**
-   * The session ended. Bring the card back when nothing else would be visible
-   * behind the canvas; otherwise just leave the "Enter XR" chip.
+   * The session ended. Show the card only when `showCard` is set; otherwise
+   * just leave the "Enter XR" chip.
    */
   public onSessionEnd(showCard: boolean) {
     this.presenting = false;

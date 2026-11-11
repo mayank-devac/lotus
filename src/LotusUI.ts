@@ -95,6 +95,8 @@ export class LotusUI {
 
   // Timer state
   private isTimerRunning = false;
+  /** The running timer also dims everything outside the focus area (false: timer only). */
+  private timerUsesArea = true;
   private timerRemainingSec = 25 * 60;
   private timerElapsedSec = 0;
   private timerIntervalId: number | null = null;
@@ -819,7 +821,7 @@ export class LotusUI {
       markerEl.style.setProperty('--pin-accent', pin.color || '#E84D2B');
 
       // Depth-of-Field effect on objects/pins: dynamically increase blurriness the further from focus center
-      if (this.isTimerRunning) {
+      if (this.isTimerRunning && this.timerUsesArea) {
         const dx = (proj.screenX - focusCenterX) / halfW;
         const dy = (proj.screenY - focusCenterY) / halfH;
         const normDist = Math.hypot(dx, dy);
@@ -857,7 +859,8 @@ export class LotusUI {
     const isPreviewingFocusArea =
       this.currentMode === 'focus-drag' && !this.isRedraggingFocusArea;
 
-    if (!this.isTimerRunning && !isPreviewingFocusArea) {
+    const shieldOn = this.isTimerRunning && this.timerUsesArea;
+    if (!shieldOn && !isPreviewingFocusArea) {
       this.apertureRootEl.style.display = 'none';
     } else {
       this.apertureRootEl.style.display = 'block';
@@ -1003,8 +1006,13 @@ export class LotusUI {
   // TIMER ENGINE
   // ===========================================================================
 
-  public startFocusTimer() {
+  /**
+   * `withArea` false runs only the clock: nothing around the focus area is
+   * dimmed. By default the "Start focus" setting decides.
+   */
+  public startFocusTimer(withArea = this.settings.focusStart !== 'timer') {
     if (this.isTimerRunning) return;
+    this.timerUsesArea = withArea;
     if (
       this.settings.timerMode !== 'stopwatch' &&
       this.timerRemainingSec <= 0
@@ -3679,6 +3687,11 @@ export class LotusUI {
 
   public getIsTimerRunning(): boolean {
     return this.isTimerRunning;
+  }
+
+  /** The running timer dims around the focus area (false for a timer-only session). */
+  public getTimerUsesArea(): boolean {
+    return this.isTimerRunning && this.timerUsesArea;
   }
 
   private escapeHtml(str: string): string {

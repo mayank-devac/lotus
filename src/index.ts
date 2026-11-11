@@ -283,8 +283,8 @@ class LotusSpatialApp extends xb.Script {
   /**
    * In an immersive-ar session (Meta Quest, Android XR…) the device composites
    * real-world passthrough itself, so release the getUserMedia stream and hide
-   * the onboarding card. When the session ends, fall back to the web camera,
-   * or to the card again if the webcam was never enabled.
+   * the onboarding card. When the session ends, fall back to the web camera
+   * if it was enabled; the card stays dismissed and only the chip shows.
    */
   private bindXRSessionEvents() {
     const renderer = xb.core?.renderer as THREE.WebGLRenderer | undefined;
@@ -324,7 +324,9 @@ class LotusSpatialApp extends xb.Script {
       renderer.domElement.classList.add('lotus-canvas');
       document.body.classList.remove('lotus-xr-active');
       this.immersive.end();
-      this.cameraGate?.onSessionEnd(!this.webcamWanted);
+      // Leaving XR is deliberate: don't re-show the onboarding card, just the
+      // "Enter XR" chip so the user can go back in.
+      this.cameraGate?.onSessionEnd(false);
       if (this.webcamWanted) {
         this.cameraPassthrough.setVisible(true);
         void this.cameraPassthrough.startCamera();
@@ -357,7 +359,8 @@ class LotusSpatialApp extends xb.Script {
 
   /** One place that decides which focus visuals show for the current state. */
   private syncFocusVisuals() {
-    const running = this.ui.getIsTimerRunning();
+    // A timer-only session leaves the room undimmed.
+    const running = this.ui.getTimerUsesArea();
     const presenting = this.isXRPresenting();
     // In a headset the made-up default zone is an arbitrary spot in the room,
     // so its frame only shows once the user has marked out a real one.

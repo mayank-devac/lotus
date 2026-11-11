@@ -11,6 +11,7 @@ import {
   XRDrawerData,
   XRHudAction,
   XRInterface,
+  XRMovablePanel,
   XRPanelHit,
   XRPointerRay,
   XRTaskFilter,
@@ -112,7 +113,9 @@ type XRGesture =
       moved: boolean;
     }
   | {
-      kind: 'hud';
+      /** A panel carried by its grip. */
+      kind: 'move';
+      panel: XRMovablePanel;
       controller: xb.Controller;
       /** How far along the ray the panel was grabbed. */
       distance: number;
@@ -126,7 +129,7 @@ type XRTarget =
   | {kind: 'panel'; hit: XRPanelHit}
   | {kind: 'pin'; pinId: string; distance: number}
   | {kind: 'space'; hit: SpatialHit}
-  /** The keyboard is open and the ray is not on it: nothing else responds. */
+  /** The keyboard is open and the ray is not on a panel: pins and the room ignore it. */
   | {kind: 'blocked'};
 
 /** The task being created (taskId null) or edited in the drawer. */
@@ -220,6 +223,8 @@ export class ImmersiveSession {
   private zoneBeforeEdit: FocusZoneBounds | null = null;
   private zoneDrawn = false;
   private startTimerAfterZone = false;
+  /** Play was pressed with "Start focus: Ask each time": the panel shows the choice. */
+  private askingStart = false;
 
   // Tasks and pins drawer.
   private taskFilter: XRTaskFilter = 'all';
@@ -229,8 +234,10 @@ export class ImmersiveSession {
   /** Text for the next placed pin, when it is being placed for a task. */
   private pendingPinContent: PinContent | null = null;
 
-  // Text entry. `textEdit` is the edit the keyboard is open for.
-  private textEdit: {apply: (text: string) => void} | null = null;
+  // Text entry. `textEdit` is the edit the keyboard is open for: `apply`
+  // saves the typed text, `alive` is false once what it edits has gone (card
+  // closed, task form cancelled), which closes the keyboard.
+  private textEdit: {apply: (text: string) => void; alive: () => boolean} | null = null;
   private systemKeyboard = false;
   private stopDictation: (() => void) | null = null;
   private stopSystemKeyboard: (() => void) | null = null;
@@ -302,6 +309,7 @@ export class ImmersiveSession {
     this.zoneBeforeEdit = null;
     this.zoneDrawn = false;
     this.startTimerAfterZone = false;
+    this.askingStart = false;
     this.openTaskId = null;
     this.taskForm = null;
     this.pendingPinContent = null;
@@ -445,7 +453,7 @@ export class ImmersiveSession {
           : g.grabDistance;
         continue;
       }
-      if (g.kind === 'hud' && g.controller === controller) {
+      if (g.kind === 'move' && g.controller === controller) {
         ray.distance = g.distance;
         continue;
       }
@@ -487,21 +495,24 @@ export class ImmersiveSession {
     }
     this.ui.updatePointers(this.rays.slice(0, controllers.length));
 
+    if (this.textEdit && !this.textEdit.alive()) this.closeEditor();
     const typing = this.ui.editor.isOpen();
+    if (this.askingStart && (this.ui.isHudHidden() || this.host.ui.getIsTimerRunning())) {
+      this.askingStart = false;
+    }
     this.ui.updateHud(
       {
         clock: this.host.ui.getTimerClockText(),
         timerRunning: this.host.ui.getIsTimerRunning(),
         mode,
         hint: this.hint(mode),
+        askingStart: this.askingStart,
       },
       camera,
-      delta,
-      typing || this.gesture.kind === 'hud',
     );
     if (this.ui.getDrawerTab()) this.ui.updateDrawer(this.drawerData());
     this.ui.updateZoneBar(camera, this.zoneBarAnchor(mode));
-    this.ui.editor.update(camera, delta);
+    this.ui.editor.update(camera);
 
     const cardPinId = this.ui.getCardPinId();
     if (cardPinId) {
@@ -523,6 +534,7 @@ export class ImmersiveSession {
 
   /** What the control panel says when nothing more specific is showing. */
   private hint(mode: AppMode): string {
+    if (this.askingStart) return 'Start how? Timer only, or dim around a focus area';
     if (this.ui.editor.isOpen()) return 'Type on the keyboard, then press Done';
     switch (mode) {
       case 'explore':
@@ -601,8 +613,9 @@ export class ImmersiveSession {
     switch (target.kind) {
       case 'panel':
         if (target.hit.action) this.pulse(controller, 0.35, 25);
-        if (target.hit.panel === 'hud' && target.hit.action === 'move-hud') {
-          this.grabHud(controller, target.hit.distance);
+        const grip = gripOf(target.hit);
+        if (grip) {
+          this.grabPanel(grip, controller, target.hit.distance);
         } else {
           this.runPanelAction(target.hit);
         }
@@ -643,7 +656,7 @@ export class ImmersiveSession {
     this.aim(controller);
     const {origin, direction} = this.raycaster.ray;
 
-    if (g.kind === 'hud') {
+    if (g.kind === 'move') {
       // The panel rides the ray at the distance it was grabbed from.
       _turn.setFromUnitVectors(g.startDir, direction);
       _hudPos
@@ -651,7 +664,7 @@ export class ImmersiveSession {
         .applyQuaternion(_turn)
         .add(origin)
         .addScaledVector(direction, g.distance);
-      this.ui.setHudPosition(_hudPos);
+      this.ui.setPanelPosition(g.panel, _hudPos);
       return;
     }
 
@@ -706,7 +719,7 @@ export class ImmersiveSession {
     this.gesture = IDLE;
 
     switch (g.kind) {
-      case 'hud':
+      case 'move':
         lotusSound.playHoverTick();
         return;
       case 'pin': {
@@ -774,14 +787,15 @@ export class ImmersiveSession {
     }
   }
 
-  private grabHud(controller: xb.Controller, distance: number) {
+  private grabPanel(panel: XRMovablePanel, controller: xb.Controller, distance: number) {
     const {origin, direction} = this.raycaster.ray;
     this.gesture = {
-      kind: 'hud',
+      kind: 'move',
+      panel,
       controller,
       distance,
       offset: this.ui
-        .getHudPosition(new THREE.Vector3())
+        .getPanelPosition(panel, new THREE.Vector3())
         .sub(origin)
         .addScaledVector(direction, -distance),
       startDir: direction.clone(),
@@ -802,7 +816,8 @@ export class ImmersiveSession {
   /** The nearest thing under the current ray: a panel, a pin, or the room. */
   private pick(): XRTarget {
     const panel = this.ui.hitTest(this.raycaster);
-    // The keyboard takes over: nothing behind or beside it can be pressed.
+    // While typing every panel still works, but a stray pinch must not grab a
+    // pin or place anything in the room.
     if (this.ui.editor.isOpen()) {
       return panel ? {kind: 'panel', hit: panel} : {kind: 'blocked'};
     }
@@ -884,21 +899,37 @@ export class ImmersiveSession {
   private runHudAction(action: XRHudAction) {
     const mode = this.host.getMode();
     const timer = this.host.ui;
+    // Any other button answers the "Start how?" question with "not now".
+    if (action !== 'start-timer-only' && action !== 'start-with-area') {
+      this.askingStart = false;
+    }
     switch (action) {
       case 'toggle-timer':
         if (timer.getIsTimerRunning()) {
           timer.stopFocusTimer();
-        } else if (mode === 'focus-drag' && this.canConfirmZone()) {
-          // Starting focus while an area is on show uses that area.
-          this.startTimerAfterZone = true;
-          this.confirmZone();
-        } else if (this.host.focusZoneNeedsDefining()) {
-          // The timer starts once the area is confirmed; the hint says what to do.
-          this.setMode('focus-drag');
-          this.startTimerAfterZone = true;
-        } else {
-          timer.startFocusTimer();
+          return;
         }
+        switch (timer.getSettings().focusStart) {
+          case 'ask':
+            this.askingStart = true;
+            return;
+          case 'timer':
+            this.startTimerOnly();
+            return;
+          case 'area':
+            this.startFocusWithArea();
+            return;
+        }
+        return;
+      case 'start-timer-only':
+        this.askingStart = false;
+        this.startTimerOnly();
+        return;
+      case 'start-with-area':
+        this.askingStart = false;
+        this.startFocusWithArea();
+        return;
+      case 'start-cancel':
         return;
       case 'place-pin':
         this.setMode(mode === 'pin-add' ? 'explore' : 'pin-add');
@@ -922,6 +953,27 @@ export class ImmersiveSession {
       case 'exit-xr':
         void this.xrSession?.end();
         return;
+    }
+  }
+
+  /** Runs just the clock: nothing in the room is dimmed. */
+  private startTimerOnly() {
+    if (this.host.getMode() === 'focus-drag') this.setMode('explore');
+    this.host.ui.startFocusTimer(false);
+  }
+
+  /** Starts focus with the room dimmed outside the focus area, setting the area first if needed. */
+  private startFocusWithArea() {
+    if (this.host.getMode() === 'focus-drag' && this.canConfirmZone()) {
+      // Starting focus while an area is on show uses that area.
+      this.startTimerAfterZone = true;
+      this.confirmZone();
+    } else if (this.host.focusZoneNeedsDefining()) {
+      // The timer starts once the area is confirmed; the hint says what to do.
+      this.setMode('focus-drag');
+      this.startTimerAfterZone = true;
+    } else {
+      this.host.ui.startFocusTimer(true);
     }
   }
 
@@ -981,7 +1033,7 @@ export class ImmersiveSession {
     this.setMode('explore');
     lotusSound.playPinCreated();
     if (startTimer && !this.host.ui.getIsTimerRunning()) {
-      this.host.ui.startFocusTimer();
+      this.host.ui.startFocusTimer(true);
     } else {
       this.ui.flashStatus('Focus area saved');
     }
@@ -1005,6 +1057,8 @@ export class ImmersiveSession {
     if (action !== 'task-delete') this.armed = null;
     const [name, id, direction] = action.split(':');
     switch (name) {
+      case 'move-drawer':
+        return; // A drag, handled in selectStart.
       case 'page-prev':
         this.ui.turnDrawerPage(-1);
         return;
@@ -1128,6 +1182,7 @@ export class ImmersiveSession {
         this.taskForm = null;
         return;
       case 'form-save':
+        this.commitTextEdit();
         this.saveTaskForm();
         return;
     }
@@ -1292,6 +1347,8 @@ export class ImmersiveSession {
     const pinId = this.ui.getCardPinId();
     if (!pinId) return;
     switch (action) {
+      case 'move-card':
+        return; // A drag, handled in selectStart.
       case 'close':
         this.closeCard();
         return;
@@ -1305,6 +1362,8 @@ export class ImmersiveSession {
         this.ui.setCardEditing(true);
         return;
       case 'edit-done':
+        // Text still on the keyboard counts, as if Done was pressed there.
+        this.commitTextEdit();
         this.ui.setCardEditing(false);
         return;
       case 'field-title':
@@ -1380,29 +1439,47 @@ export class ImmersiveSession {
   ) {
     const pin = this.findPin(pinId);
     if (!pin) return;
-    this.requestText(request ?? {...PIN_TEXT_FIELDS[field], initial: pin[field]}, (text) => {
-      // A pin always keeps a title: an emptied one stays as it was.
-      if (!text && field === 'title') return;
-      this.updatePin(pinId, (p) => (p[field] === text ? p : {...p, [field]: text}));
-    });
+    this.requestText(
+      request ?? {...PIN_TEXT_FIELDS[field], initial: pin[field]},
+      (text) => {
+        // A pin always keeps a title: an emptied one stays as it was.
+        if (!text && field === 'title') return;
+        this.updatePin(pinId, (p) => (p[field] === text ? p : {...p, [field]: text}));
+      },
+      () => this.ui.getCardPinId() === pinId && Boolean(this.findPin(pinId)),
+    );
   }
 
   /** Opens the keyboard for one field of the task form. */
   private editTaskText(field: TaskTextField) {
     const form = this.taskForm;
     if (!form) return;
-    this.requestText({...TASK_TEXT_FIELDS[field], initial: form[field]}, (text) => {
-      if (this.taskForm === form) form[field] = text;
-    });
+    this.requestText(
+      {...TASK_TEXT_FIELDS[field], initial: form[field]},
+      (text) => {
+        if (this.taskForm === form) form[field] = text;
+      },
+      () =>
+        this.taskForm === form &&
+        this.ui.getDrawerTab() === 'tasks' &&
+        !this.ui.isHudHidden(),
+    );
   }
 
   /**
    * Opens the keyboard. `apply` receives the trimmed text when the user
-   * presses Done; Cancel drops the edit.
+   * presses Done; Cancel drops the edit. The keyboard closes by itself once
+   * `alive` turns false. Moving on to another field keeps what was typed in
+   * the current one.
    */
-  private requestText(request: XRTextRequest, apply: (text: string) => void) {
+  private requestText(
+    request: XRTextRequest,
+    apply: (text: string) => void,
+    alive: () => boolean,
+  ) {
+    this.commitTextEdit();
     this.stopTextTools();
-    this.textEdit = {apply};
+    this.textEdit = {apply, alive};
     this.ui.editor.open(request, {
       voice: isSpeechSupported(),
       systemKeyboard: this.systemKeyboard,
@@ -1413,6 +1490,13 @@ export class ImmersiveSession {
     this.stopTextTools();
     this.textEdit = null;
     this.ui.editor.close();
+  }
+
+  /** Saves what is on the keyboard to its field, as Done would, but keeps the keyboard open. */
+  private commitTextEdit() {
+    const edit = this.textEdit;
+    if (!edit || !this.ui.editor.isOpen() || !edit.alive()) return;
+    edit.apply(this.ui.editor.getText().trim());
   }
 
   /** Stops dictation and the headset keyboard, whichever is running. */
@@ -1442,6 +1526,8 @@ export class ImmersiveSession {
       case 'cancel':
         this.closeEditor();
         return;
+      case 'move':
+        return; // A drag, handled in selectStart.
       case 'voice':
         this.toggleDictation();
         return;
@@ -1506,4 +1592,14 @@ export class ImmersiveSession {
     this.stopSystemKeyboard = stop;
     editor.setStatus('Type on the headset keyboard, then close it and press Done');
   }
+}
+
+/** The panel a hit's grip button moves, or null when the hit is not on a grip. */
+function gripOf(hit: XRPanelHit): XRMovablePanel | null {
+  if (hit.panel === 'hud' && hit.action === 'move-hud') return 'hud';
+  // The drawer rides on the control panel: its grip moves both.
+  if (hit.panel === 'drawer' && hit.action === 'move-drawer') return 'hud';
+  if (hit.panel === 'card' && hit.action === 'move-card') return 'card';
+  if (hit.panel === 'editor' && hit.action === 'move') return 'editor';
+  return null;
 }
