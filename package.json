@@ -1,8 +1,14 @@
 {
-  "name": "xrblocks-example",
+  "name": "lotus",
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "description": "Spatial AR memory pins and distraction-free study focus zone — WebXR, browser-only, no backend.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mayank-devac/lotus.git"
+  },
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",

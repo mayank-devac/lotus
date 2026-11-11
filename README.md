@@ -100,20 +100,31 @@ assets/
   icon.svg               LOTUS brand icon (inlined into the UI via `?raw` import; fill=currentColor)
   logo.svg               logo shown in this README (white background)
 src/
-  vite-env.d.ts          vite/client types (`?raw` SVG imports)
   index.ts               bootstrap: builds xb.Options() and mounts LotusSpatialApp;
-                         drag/pinch interaction state for BOTH input families
-                         (DOM mouse/touch AND XR controller/hand pinch)
-  LotusUI.ts             all DOM overlay UI (d3-based): welcome panel, note composer,
-                         XR keyboard, pin inspector, pin directory, tasks + insights
+                         DOM drag/pinch interaction state (parallel to the XR path)
+  ImmersiveSession.ts    in-headset session: modes, gestures, ray targeting, panel actions
+  XRInterface.ts         in-headset panels (draw + hit-test only)
+  XRPanel.ts             CanvasPanel building blocks for the in-scene UI
+  XRTextEditor.ts        in-scene keyboard (modal, works in every headset/emulator)
+  xrTextInput.ts         Quest system keyboard bridge (Browser 26.1+)
+  xrSettings.ts          settings rows driving the Settings drawer
+  RoomAnchor.ts          moves worldRoot from one persistent WebXR anchor each frame
   PinManager3D.ts        3D beacon pins, proximity detector, floating headers
   FocusVolume3D.ts       drag-to-define focus volume, shield meshes, aperture projection
   CameraPassthrough.ts   getUserMedia video feed behind the transparent canvas
+  CameraGate.ts          onboarding card and the only way into XR
   StudyRoomBuilder.ts    procedural furnished study room + surface colliders
+  speech.ts              Web Speech dictation (degrades gracefully)
+  device.ts              standalone-headset check
+  icons.ts               SVG path data for in-headset panel icons
   sound.ts               zero-dependency WebAudio synth
   storage.ts             localStorage persistence + seed/demo data + migrations
+  tasks.ts               pure task-list helpers (shared by DOM UI and XR)
   types.ts               data shapes (all JSON-serializable)
   index.css              theme + layout (obsidian slate / cyan / amber palette)
+  LotusUI.ts             all DOM overlay UI (d3-based): welcome panel, note composer,
+                         XR keyboard, pin inspector, pin directory, tasks + insights
+  vite-env.d.ts          vite/client types (`?raw` SVG imports)
 ```
 
 ## Tech stack
@@ -122,14 +133,14 @@ src/
 - **three.js** — 3D scene, geometry, raycasting, billboarding
 - **lit** — dependency of xrblocks (XR button / simulator UI statically import it; required for `vite build` even though LOTUS never imports it directly)
 - **d3** — DOM overlay rendering, task insights charts
-- **Vite** — dev server and builds (no `vite.config.ts`; defaults only)
+- **Vite** — dev server and builds (`vite.config.ts` is minimal: relative `base` so the build works at any GitHub Pages sub-path, plus three.js dedupe)
 - **Web Speech API, getUserMedia, WebAudio, localStorage** — platform APIs, degrade gracefully when unsupported
 
 ## Notes & constraints
 
 - There is **no backend, no env vars, no API keys**. Nothing reads `process.env` / `import.meta.env`.
 - `package.json` is deliberately minimal: `d3`, `lit`, `three`, `xrblocks`. `lit` is required by xrblocks (dropping it breaks `vite build`), and `@pmndrs/uikit` auto-installs as xrblocks' required peer. Other xrblocks peers (`openai`, `@google/genai`, `@mediapipe/*`, spark, three-mesh-bvh, three-pathfinding) are optional peers never bundled in — LOTUS has no AI/vision SDK code. Don't re-add them unless actually using an xrblocks feature that needs one.
-- Number of scripts beyond the `package.json` ones: none. There is **no test suite and no CI**; `bun run lint` (typecheck) is the sole gate.
+- Number of scripts beyond the `package.json` ones: none. There is **no test suite**; `bun run lint` (typecheck) is the sole quality gate locally. CI (`.github/workflows/deploy.yml`) typechecks and deploys to GitHub Pages on every push to `main`.
 - Product spec and confirmed UX decisions live in `.plan/artifacts/implementation_plan.md` — read it before product-level changes.
 - If you change requested device permissions, update `metadata.json` (`requestFramePermissions`) accordingly.
 - Every interaction code change must handle **both input families**: DOM mouse/touch and XR controller/hand pinch, or the app breaks on headset.
