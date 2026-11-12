@@ -12,6 +12,7 @@ import {
 } from './FocusVolume3D';
 import {LotusUI} from './ui/LotusUI';
 import {ImmersiveSession} from './xr/ImmersiveSession';
+import type {PinContent} from './xr/ImmersiveHost';
 import {PinManager3D} from './PinManager3D';
 import {StudyRoomBuilder} from './StudyRoomBuilder';
 import {lotusSound} from './sound';
@@ -418,7 +419,7 @@ class LotusSpatialApp extends xb.Script {
    */
   private createPinAt(
     hit: SpatialHit,
-    content?: Pick<SpatialPin, 'title' | 'body' | 'surfaceLabel'>,
+    content?: PinContent,
   ): SpatialPin {
     const pin: SpatialPin = {
       id: `pin-${Date.now()}`,

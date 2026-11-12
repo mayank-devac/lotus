@@ -283,6 +283,7 @@ export class LotusUI {
         this.renderAllPanels();
       } else {
         this.tasksNav.updateReadouts();
+        this.dock.updateReadouts();
       }
     }, 250);
   }

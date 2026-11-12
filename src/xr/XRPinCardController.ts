@@ -8,7 +8,8 @@ import {XRInterface} from './XRInterface';
 import {XRTextEntry} from './XRTextEntry';
 import {XRTextRequest} from './XRTextEditor';
 
-type PinTextField = keyof PinContent;
+/** The pin's text fields; `taskId` is a link, not text a user edits. */
+type PinTextField = Extract<keyof PinContent, 'title' | 'body' | 'surfaceLabel'>;
 const PIN_TEXT_FIELDS: Record<PinTextField, Omit<XRTextRequest, 'initial'>> = {
   title: {label: 'Pin title', maxLength: 80},
   body: {label: 'Pin note', maxLength: 400},

@@ -95,6 +95,11 @@ function hoveredOn<P extends XRPanelHit['panel']>(
   return actions;
 }
 
+/** Part of a redraw key: the task timer pill's clock and run state, or "none". */
+function taskTimerKey(taskTimer: XRHudState['taskTimer']): string {
+  return taskTimer ? `${taskTimer.clock}|${taskTimer.running}` : 'none';
+}
+
 export class XRInterface {
   public readonly root = new THREE.Group();
   public readonly editor = new XRTextEditor();
@@ -105,6 +110,7 @@ export class XRInterface {
   private hudState: XRHudState = {
     clock: '00:00',
     timerRunning: false,
+    taskTimer: null,
     mode: 'explore',
     hint: '',
     askingStart: false,
@@ -270,7 +276,7 @@ export class XRInterface {
     camera.getWorldPosition(_camPos);
 
     if (this.hudHidden) {
-      const key = `${state.clock}|${state.timerRunning}|${this.chip.hoverKey()}`;
+      const key = `${state.clock}|${state.timerRunning}|${taskTimerKey(state.taskTimer)}|${this.chip.hoverKey()}`;
       if (key !== this.chipKey) {
         this.chipKey = key;
         this.hudState = state;
@@ -285,7 +291,7 @@ export class XRInterface {
       this.hud.hoveredLabel() ??
       this.drawer.panel.hoveredLabel() ??
       (this.flashText && performance.now() < this.flashUntil ? this.flashText : state.hint);
-    const key = `${state.clock}|${state.timerRunning}|${state.mode}|${state.askingStart}|${state.exitArmed}|${status}|${this.hud.hoverKey()}|${this.drawer.getTab()}`;
+    const key = `${state.clock}|${state.timerRunning}|${taskTimerKey(state.taskTimer)}|${state.mode}|${state.askingStart}|${state.exitArmed}|${status}|${this.hud.hoverKey()}|${this.drawer.getTab()}`;
     if (key !== this.hudKey) {
       this.hudKey = key;
       this.hudState = state;
@@ -334,6 +340,33 @@ export class XRInterface {
     const y = 214;
     const h = 116;
     if (s.askingStart) {
+      if (s.taskTimer) {
+        // The task timer takes over the question as the full-text primary
+        // choice; the two ways to start focus become icons beside it.
+        const {running, clock} = s.taskTimer;
+        hud.drawButton(
+          'toggle-task-timer',
+          `${running ? 'Pause' : 'Resume'} task${clock ? ` (${clock})` : ''}`,
+          {text: `${running ? 'Pause' : 'Resume'} task${clock ? ` · ${clock}` : ''}`},
+          30, y, 372, h,
+          {active: !running, fontSize: 34},
+        );
+        hud.drawButton(
+          'start-timer-only',
+          'Just run the timer; the room stays clear',
+          {icon: 'timer'},
+          414, y, 84, h,
+        );
+        hud.drawButton(
+          'start-with-area',
+          'Dim everything outside your focus area',
+          {icon: 'focusArea'},
+          510, y, 84, h,
+        );
+        hud.drawButton('start-cancel', 'Do not start', {icon: 'close'}, 606, y, 84, h);
+        hud.commit();
+        return;
+      }
       hud.drawButton(
         'start-timer-only',
         'Just run the timer; the room stays clear',
@@ -590,8 +623,17 @@ export class XRInterface {
     getWorldPosition: (pinId: string, target: THREE.Vector3) => boolean,
     hoveredPinId: string | null,
     delta: number,
+    runningTaskClocks: ReadonlyMap<string, string>,
   ) {
-    this.labels.update(pins, projections, getWorldPosition, hoveredPinId, delta, this.card.getPinId());
+    this.labels.update(
+      pins,
+      projections,
+      getWorldPosition,
+      hoveredPinId,
+      delta,
+      this.card.getPinId(),
+      runningTaskClocks,
+    );
   }
 
   /**

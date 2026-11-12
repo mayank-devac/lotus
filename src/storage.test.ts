@@ -137,6 +137,21 @@ describe('loadSavedPins', () => {
     expect(pins[0]).toMatchObject({id: 'pin-1', title: 'Untitled pin', color: '#E84D2B'});
     expect(pins[0].normal).toEqual({x: 0, y: 1, z: 0});
   });
+
+  it('keeps a task pin link and drops an unsafe one', () => {
+    store(PINS, [
+      {
+        id: 'pin-1',
+        title: 'From a task',
+        taskId: 'task-1',
+        position: {x: 1, y: 2, z: 3},
+      },
+      {id: 'pin-2', taskId: 'not a safe id', position: {x: 1, y: 2, z: 3}},
+    ]);
+    const pins = loadSavedPins();
+    expect(pins[0]?.taskId).toBe('task-1');
+    expect(pins[1]?.taskId).toBeUndefined();
+  });
 });
 
 describe('loadLotusSettings', () => {

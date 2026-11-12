@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import {PinScreenProjection, SpatialPin} from '../types';
-import {FONT_BODY, PANEL_BG, TEXT_MAIN, fitText, roundRectPath} from './XRPanel';
+import {ACCENT, FONT_BODY, FONT_MONO, PANEL_BG, TEXT_MAIN, fitText, roundRectPath} from './XRPanel';
 import {fillPinColor} from './panelWidgets';
 /** Pin labels keep their natural size up to here, then grow with distance. */
 const LABEL_FULL_SIZE_DISTANCE = 0.8;
@@ -51,7 +51,11 @@ export class XRPinLabels {
     this.labels.clear();
   }
 
-  /** `cardPinId`: the pin whose card is open shows no label. */
+  /**
+   * `cardPinId`: the pin whose card is open shows no label.
+   * `runningTaskClocks`: remaining MM:SS per running task, by task id; a pin
+   * placed for such a task draws that clock on its label.
+   */
   public update(
     pins: SpatialPin[],
     projections: PinScreenProjection[],
@@ -59,6 +63,7 @@ export class XRPinLabels {
     hoveredPinId: string | null,
     delta: number,
     cardPinId: string | null,
+    runningTaskClocks: ReadonlyMap<string, string>,
   ) {
     // One lookup table per call instead of a search through the pins for
     // every projection; both collections are reused between frames.
@@ -93,10 +98,11 @@ export class XRPinLabels {
         label.sprite.visible = false;
         continue;
       }
-      const key = `${pin.title}|${pin.color}`;
+      const clock = pin.taskId ? runningTaskClocks.get(pin.taskId) ?? null : null;
+      const key = `${pin.title}|${pin.color}|${clock ?? ''}`;
       if (label.key !== key) {
         label.key = key;
-        this.drawLabel(label, pin);
+        this.drawLabel(label, pin, clock);
       }
       const scale = THREE.MathUtils.clamp(
         proj.distanceMeters / LABEL_FULL_SIZE_DISTANCE,
@@ -141,7 +147,7 @@ export class XRPinLabels {
     return {sprite, canvas, texture, material, key: '', opacity: 0};
   }
 
-  private drawLabel(label: PinLabel, pin: SpatialPin) {
+  private drawLabel(label: PinLabel, pin: SpatialPin, clock: string | null) {
     const ctx = label.canvas.getContext('2d')!;
     ctx.clearRect(0, 0, 512, 128);
     roundRectPath(ctx, 4, 14, 504, 100, 50);
@@ -150,10 +156,19 @@ export class XRPinLabels {
     ctx.beginPath();
     ctx.arc(58, 64, 16, 0, Math.PI * 2);
     fillPinColor(ctx, pin);
+    ctx.textBaseline = 'middle';
+    // A running task timer sits on the right; the title then keeps clear of it.
+    let titleWidth = 380;
+    if (clock) {
+      ctx.font = `700 40px ${FONT_MONO}`;
+      const clockWidth = Math.ceil(ctx.measureText(clock).width);
+      ctx.fillStyle = ACCENT;
+      ctx.fillText(clock, 488 - clockWidth, 66);
+      titleWidth = Math.max(140, 488 - clockWidth - 28 - 92);
+    }
     ctx.fillStyle = TEXT_MAIN;
     ctx.font = `600 40px ${FONT_BODY}`;
-    ctx.textBaseline = 'middle';
-    ctx.fillText(fitText(ctx, pin.title || 'Untitled pin', 380), 92, 66);
+    ctx.fillText(fitText(ctx, pin.title || 'Untitled pin', titleWidth), 92, 66);
     ctx.textBaseline = 'alphabetic';
     label.texture.needsUpdate = true;
   }

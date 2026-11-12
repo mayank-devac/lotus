@@ -30,7 +30,7 @@ export interface LotusUICallbacks {
 }
 
 /** Text a pin is created with when it is placed for a task. */
-export type PendingPinContent = Pick<SpatialPin, 'title' | 'body' | 'surfaceLabel'>;
+export type PendingPinContent = Pick<SpatialPin, 'title' | 'body' | 'surfaceLabel' | 'taskId'>;
 
 export type ModalId = 'welcome' | 'tasks' | 'composer' | 'directory' | 'inspector';
 /** The modals the top bar opens; opening one closes every other. */

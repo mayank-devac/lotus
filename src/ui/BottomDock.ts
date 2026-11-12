@@ -1,10 +1,32 @@
 import {lotusSound} from '../sound';
+import {dockTaskTimer, taskClockText, toggleTaskTimer} from '../tasks';
+import {escapeHtml} from './dom';
 import {UIHost} from './UIHost';
 
+/** Inline icons for the dock's compact buttons (stroke follows the text colour). */
+const PIN_ICON_SVG = `
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
+    <circle cx="12" cy="10" r="3"/>
+  </svg>`;
+const FOCUS_AREA_ICON_SVG = `
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="3.5" y="6" width="17" height="12" rx="2.5" stroke-dasharray="3 2.6"/>
+  </svg>`;
+const PLAY_ICON_SVG = `
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" stroke="none" aria-hidden="true">
+    <path d="M8 5.5v13l11-6.5z"/>
+  </svg>`;
+const PAUSE_ICON_SVG = `
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true">
+    <path d="M8.5 5.5v13M15.5 5.5v13"/>
+  </svg>`;
+
 /**
- * The bottom dock: + ADD PIN, focus area and FOCUS (start timer). In focus
- * area mode it turns into the visibility slider with AGAIN and OKAY. Hidden
- * while the timer runs and while a pin is being placed.
+ * The bottom dock: focus area and FOCUS (start timer) buttons, plus the
+ * running/paused task timer's pill (pause it, or resume it after a pause).
+ * In focus area mode it turns into the visibility slider with AGAIN and OKAY.
+ * Hidden while the timer runs and while a pin is being placed.
  */
 export class BottomDock {
   constructor(
@@ -101,13 +123,15 @@ export class BottomDock {
 
     this.el.innerHTML = `
       <div class="lotus-dock-surface">
-        <button type="button" id="dock-mode-pin" class="lotus-dock-btn ${this.host.mode === 'pin-add' ? 'is-active' : ''}">
-          + ADD PIN
+        <button type="button" id="dock-mode-pin" class="lotus-dock-btn is-icon ${this.host.mode === 'pin-add' ? 'is-active' : ''}" aria-label="Add pin" title="Add Pin">
+          ${PIN_ICON_SVG}
         </button>
 
-        <button type="button" id="dock-mode-drag" class="lotus-dock-btn">
-          ⬚ 
+        <button type="button" id="dock-mode-drag" class="lotus-dock-btn is-icon" aria-label="Focus area" title="Focus Area">
+          ${FOCUS_AREA_ICON_SVG}
         </button>
+
+        ${this.taskTimerPillHtml()}
 
         <button type="button" id="dock-timer-toggle" class="lotus-dock-cta">
           <span>FOCUS</span>
@@ -137,6 +161,17 @@ export class BottomDock {
       });
 
     this.el
+      .querySelector('#dock-task-timer')
+      ?.addEventListener('click', () => {
+        const task = dockTaskTimer(this.host.tasks);
+        if (!task) return;
+        this.host.tasks = toggleTaskTimer(this.host.tasks, task.id);
+        lotusSound.playKeyTap();
+        this.host.callbacks.onSaveTasks(this.host.tasks);
+        this.host.renderAll();
+      });
+
+    this.el
       .querySelector('#dock-timer-toggle')
       ?.addEventListener('click', () => {
         if (this.host.mode !== 'explore') {
@@ -145,5 +180,55 @@ export class BottomDock {
         }
         this.host.startFocusTimer();
       });
+  }
+
+  /**
+   * The running or paused task timer as a compact pill: pause it while it
+   * runs, resume it after a pause, straight from the main panel. Empty when
+   * no task timer is counting down or paused mid-count.
+   */
+  private taskTimerPillHtml(): string {
+    const task = dockTaskTimer(this.host.tasks);
+    if (!task) return '';
+    const running = Boolean(task.timerRunning);
+    const label = `${running ? 'Pause' : 'Resume'} ${task.title.trim() || 'task'}'s timer`;
+    // `data-*` is what `updateReadouts` compares against, so the pill carries
+    // the task it was rendered for and that task's run state.
+    return `
+      <button
+        type="button"
+        id="dock-task-timer"
+        class="lotus-dock-task-pill ${running ? 'is-running' : ''}"
+        data-task-id="${escapeHtml(task.id)}"
+        data-running="${running ? '1' : '0'}"
+        title="${escapeHtml(label)}"
+        aria-label="${escapeHtml(label)}"
+      >
+        ${running ? PAUSE_ICON_SVG : PLAY_ICON_SVG}
+        <span id="dock-task-timer-clock" class="lotus-tabular">${taskClockText(task)}</span>
+      </button>
+    `;
+  }
+
+  /**
+   * Updates the pill's clock in place (every second while a task timer runs).
+   * Re-renders when the pill would show a different task or run state: those
+   * change the icon and the label, which only a render can redraw.
+   */
+  public updateReadouts() {
+    const pill = this.el.querySelector<HTMLButtonElement>('#dock-task-timer');
+    if (!pill) return;
+    const task = dockTaskTimer(this.host.tasks);
+    if (
+      !task ||
+      pill.dataset.taskId !== task.id ||
+      pill.dataset.running !== (task.timerRunning ? '1' : '0')
+    ) {
+      // The pill's task is gone or changed; a re-render rebuilds the pill.
+      this.render();
+      return;
+    }
+    const clockEl = this.el.querySelector('#dock-task-timer-clock');
+    if (clockEl) clockEl.textContent = taskClockText(task);
   }
 }

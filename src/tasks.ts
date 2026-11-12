@@ -18,6 +18,16 @@ export interface TaskDraft {
   timerMinutes: number;
 }
 
+/** A task's configured timer length, in seconds. */
+export function taskFullSeconds(task: LotusTask): number {
+  return task.timerSeconds ?? DEFAULT_TASK_TIMER_SEC;
+}
+
+/** A task's time left on its timer, in seconds. */
+export function taskRemainingSeconds(task: LotusTask): number {
+  return task.remainingSeconds ?? taskFullSeconds(task);
+}
+
 export function createTask(draft: TaskDraft): LotusTask {
   const durationSec = Math.max(1, draft.timerMinutes) * 60;
   return {
@@ -58,10 +68,26 @@ export function toggleTaskTimer(tasks: LotusTask[], taskId: string): LotusTask[]
   const willRun = target ? !target.timerRunning : false;
   return tasks.map((t) => {
     if (t.id !== taskId) return willRun ? {...t, timerRunning: false} : t;
-    const full = t.timerSeconds ?? DEFAULT_TASK_TIMER_SEC;
-    const left = t.remainingSeconds ?? full;
-    return {...t, timerRunning: willRun, remainingSeconds: left <= 0 ? full : left};
+    const left = taskRemainingSeconds(t);
+    return {...t, timerRunning: willRun, remainingSeconds: left <= 0 ? taskFullSeconds(t) : left};
   });
+}
+
+/**
+ * The task whose timer the main panel's pill shows: the running one, else the
+ * first paused one that has already counted down (a timer still at its full
+ * length has nothing to resume). null when no task timer needs the pill.
+ */
+export function dockTaskTimer(tasks: LotusTask[]): LotusTask | null {
+  const ongoing = tasks.filter((t) => !t.completed);
+  return (
+    ongoing.find((t) => t.timerRunning) ??
+    ongoing.find((t) => {
+      const left = taskRemainingSeconds(t);
+      return left > 0 && left < taskFullSeconds(t);
+    }) ??
+    null
+  );
 }
 
 /**
@@ -78,10 +104,7 @@ export function advanceTaskTimers(
   const next = tasks.map((t) => {
     if (t.completed || !t.timerRunning) return t;
     changed = true;
-    const left = Math.max(
-      0,
-      (t.remainingSeconds ?? t.timerSeconds ?? DEFAULT_TASK_TIMER_SEC) - seconds,
-    );
+    const left = Math.max(0, taskRemainingSeconds(t) - seconds);
     if (left === 0) finished = true;
     return {...t, remainingSeconds: left, timerRunning: left > 0};
   });
@@ -90,16 +113,16 @@ export function advanceTaskTimers(
 
 /** Remaining time on a task's timer as MM:SS. */
 export function taskClockText(task: LotusTask): string {
-  const sec = task.remainingSeconds ?? task.timerSeconds ?? DEFAULT_TASK_TIMER_SEC;
-  const mm = String(Math.floor(sec / 60)).padStart(2, '0');
-  const ss = String(sec % 60).padStart(2, '0');
+  const totalSec = taskRemainingSeconds(task);
+  const mm = String(Math.floor(totalSec / 60)).padStart(2, '0');
+  const ss = String(totalSec % 60).padStart(2, '0');
   return `${mm}:${ss}`;
 }
 
-/** What a pin dropped for a task says. */
+/** What a pin dropped for a task says, including the link back to that task. */
 export function pinContentFromTask(
   task: LotusTask,
-): Pick<SpatialPin, 'title' | 'body' | 'surfaceLabel'> {
+): Pick<SpatialPin, 'title' | 'body' | 'surfaceLabel' | 'taskId'> {
   return {
     title: task.title,
     body:
@@ -107,5 +130,6 @@ export function pinContentFromTask(
         .filter(Boolean)
         .join(' — ') || task.title,
     surfaceLabel: task.type === 'reminder' ? 'Reminder Pin' : 'Task Pin',
+    taskId: task.id,
   };
 }

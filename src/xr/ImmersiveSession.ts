@@ -8,6 +8,7 @@ import {
 } from '../FocusVolume3D';
 import type {FocusTimerEvent} from '../FocusTimer';
 import {lotusSound} from '../sound';
+import {dockTaskTimer, taskClockText, toggleTaskTimer} from '../tasks';
 import {AppMode, PinScreenProjection, SpatialHit} from '../types';
 import {ConfirmGuard} from './ConfirmGuard';
 import {ImmersiveHost, PinContent} from './ImmersiveHost';
@@ -51,7 +52,7 @@ type XRGesture =
       plane: THREE.Plane;
       /** True for an area on a desk or floor, false for one on a wall. */
       onSurface: boolean;
-      /** The area faces the user: its sides run along and across their aim. */
+      /** The area faces the user: its sides run along and across their view. */
       yaw: number;
       moved: boolean;
     }
@@ -111,6 +112,7 @@ const _palmQuat = new THREE.Quaternion();
 const _palmNormal = new THREE.Vector3();
 const _roomRay = new THREE.Ray();
 const _roomFromWorld = new THREE.Matrix4();
+const _viewForward = new THREE.Vector3();
 const _zonePoint = new THREE.Vector3();
 const _hudPos = new THREE.Vector3();
 const _turn = new THREE.Quaternion();
@@ -147,6 +149,11 @@ export class ImmersiveSession {
   private readonly confirm = new ConfirmGuard();
   /** Text for the next placed pin, when it is being placed for a task. */
   private pendingPinContent: PinContent | null = null;
+  /**
+   * Remaining time per running task timer, by task id, for the pin labels.
+   * Cleared and refilled each frame; the map itself is never reallocated.
+   */
+  private readonly runningTaskClocks = new Map<string, string>();
 
   // The parts of the session with their own state; see each class.
   private readonly text = new XRTextEntry(this.ui);
@@ -414,10 +421,18 @@ export class ImmersiveSession {
     // A hidden panel cannot show the question.
     if (this.ui.isHudHidden()) this.zone.closeQuestion();
     const {timer} = this.host;
+    const taskTimerTask = dockTaskTimer(this.host.getTasks());
+    this.refreshRunningTaskClocks();
     this.ui.updateHud(
       {
         clock: timer.clockText() || '00:00',
         timerRunning: timer.running,
+        taskTimer: taskTimerTask
+          ? {
+              clock: taskClockText(taskTimerTask),
+              running: Boolean(taskTimerTask.timerRunning),
+            }
+          : null,
         mode,
         hint: this.hint(mode),
         askingStart: this.zone.isAsking(),
@@ -445,12 +460,29 @@ export class ImmersiveSession {
       (pinId, out) => pinManager.getPinWorldPosition(pinId, out),
       hovered,
       delta,
+      this.runningTaskClocks,
     );
+  }
+
+  /** Refills `runningTaskClocks` for this frame's pin labels. */
+  private refreshRunningTaskClocks() {
+    const clocks = this.runningTaskClocks;
+    clocks.clear();
+    for (const task of this.host.getTasks()) {
+      if (!task.completed && task.timerRunning) {
+        clocks.set(task.id, taskClockText(task));
+      }
+    }
   }
 
   /** What the control panel says when nothing more specific is showing. */
   private hint(mode: AppMode): string {
-    if (this.zone.isAsking()) return 'Start how? Timer only, or dim around a focus area';
+    if (this.zone.isAsking()) {
+      const task = dockTaskTimer(this.host.getTasks());
+      return task
+        ? 'Start how? The task timer, timer only, or focus area'
+        : 'Start how? Timer only, or dim around a focus area';
+    }
     if (this.ui.editor.isOpen()) return 'Type on the keyboard, then press Done';
     switch (mode) {
       case 'explore':
@@ -773,6 +805,21 @@ export class ImmersiveSession {
     return _roomRay.copy(this.raycaster.ray).applyMatrix4(_roomFromWorld);
   }
 
+  /**
+   * The user's horizontal view direction in room space, or null when the head
+   * points straight up or down. Call after `roomRay()`, which sets
+   * `_roomFromWorld`. The dragged box's yaw follows this, not the controller
+   * aim, so the rectangle reads as straight ahead even with an angled hand.
+   */
+  private viewForwardRoom(): THREE.Vector3 | null {
+    const camera = xb.core?.camera;
+    if (!camera) return null;
+    camera.getWorldDirection(_viewForward);
+    _viewForward.transformDirection(_roomFromWorld);
+    _viewForward.y = 0;
+    return _viewForward.lengthSq() < 1e-6 ? null : _viewForward.normalize();
+  }
+
   /** Tracked controllers / hands that currently have a pose. */
   private getActiveControllers(): xb.Controller[] {
     return (xb.core?.input?.controllers ?? []).filter(
@@ -831,6 +878,17 @@ export class ImmersiveSession {
       case 'toggle-timer':
         this.zone.pressPlay();
         return;
+      case 'toggle-task-timer': {
+        // Same pause / resume the drawer's open task offers, for whichever
+        // task timer the control panel's button shows.
+        const task = dockTaskTimer(this.host.getTasks());
+        if (!task) return;
+        this.host.commitTasks(toggleTaskTimer(this.host.getTasks(), task.id));
+        this.ui.flashStatus(
+          task.timerRunning ? 'Task timer paused' : 'Task timer resumed',
+        );
+        return;
+      }
       case 'start-timer-only':
         this.zone.startTimerOnly();
         return;
@@ -876,8 +934,8 @@ export class ImmersiveSession {
    */
   private startFocusDrag(controller: xb.Controller, hit: SpatialHit) {
     const {origin, direction} = this.raycaster.ray;
-    const plane = this.planes.hit(this.raycaster.ray, hit.isSurface ? hit.distance : Infinity);
     const ray = this.roomRay();
+    const plane = this.planes.hit(this.raycaster.ray, hit.isSurface ? hit.distance : Infinity);
     // The first corner: the room surface the ray hit, else the room-setup
     // plane, else far out along the ray (a far aim must start the corner
     // there, not at the short pick fallback; the cast showed nothing blocks it).
@@ -895,15 +953,19 @@ export class ImmersiveSession {
       : ray.direction.y < FOCUS_SURFACE_PITCH;
     // The plane the second corner slides across, in room space.
     const normal = new THREE.Vector3(0, 1, 0);
-    let facing = ray.direction;
+    // The box faces the user's view, not the controller aim: an angled hand
+    // must not turn the rectangle. (`roomRay()` above has just set
+    // _roomFromWorld, which `viewForwardRoom()` reads.)
+    let facing = this.viewForwardRoom() ?? ray.direction;
     if (!onSurface) {
       if (plane) {
-        // Flat on the wall, and squared up with it rather than with the aim.
-        // (`roomRay()` above has just set _roomFromWorld.)
+        // Flat on the wall, and squared up with the wall rather than with
+        // the view or the aim.
         normal.copy(plane.normal).transformDirection(_roomFromWorld);
       } else {
-        // An upright plane facing the user, through the first corner.
-        normal.set(-ray.direction.x, 0, -ray.direction.z);
+        // An upright plane facing the user, through the first corner, so the
+        // second corner sweeps straight ahead as seen from where they stand.
+        normal.copy(facing).negate();
       }
       normal.y = 0;
       if (normal.lengthSq() < 1e-6) normal.set(0, 0, 1);

@@ -16,6 +16,7 @@ import {XRSettingId} from './xrSettings';
  */
 export type XRHudAction =
   | 'toggle-timer'
+  | 'toggle-task-timer'
   | 'place-pin'
   | 'focus-zone'
   | 'tab-tasks'
@@ -102,6 +103,8 @@ export type XRCardAction =
 export interface XRHudState {
   clock: string;
   timerRunning: boolean;
+  /** The running or paused task timer, with its MM:SS clock; null hides its button. */
+  taskTimer: {clock: string; running: boolean} | null;
   mode: AppMode;
   /** What to do next, shown when no button is hovered and nothing was flashed. */
   hint: string;

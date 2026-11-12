@@ -29,6 +29,8 @@ export class PinComposerModal {
   private draftTitle = '';
   private draftBody = '';
   private draftSurfaceLabel = 'Room Point';
+  /** The task a new pin was placed for (or an edited pin keeps); undefined otherwise. */
+  private draftTaskId: string | undefined = undefined;
   private draftColor = '#E84D2B';
   private draftShapeStyle: PinShapeStyle = 'revolving';
   private draftPosition: Vector3Data = vec3(0, 1.32, -1.4);
@@ -52,6 +54,7 @@ export class PinComposerModal {
     pending: PendingPinContent | null,
   ) {
     this.editingPinId = null;
+    this.draftTaskId = pending?.taskId;
     if (pending) {
       this.draftTitle = pending.title;
       this.draftBody = pending.body;
@@ -71,6 +74,7 @@ export class PinComposerModal {
   /** Starts a draft from an existing pin. */
   public startEdit(pin: SpatialPin) {
     this.editingPinId = pin.id;
+    this.draftTaskId = pin.taskId;
     this.draftTitle = pin.title;
     this.draftBody = pin.body;
     this.draftSurfaceLabel = pin.surfaceLabel;
@@ -418,6 +422,7 @@ export class PinComposerModal {
           title: finalTitle,
           body: finalBody,
           surfaceLabel: this.draftSurfaceLabel.trim() || 'Room Point',
+          taskId: this.draftTaskId,
           color: this.draftColor,
           shapeStyle: this.draftShapeStyle,
           position: {...this.draftPosition},

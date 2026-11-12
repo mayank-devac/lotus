@@ -3,6 +3,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {
   advanceTaskTimers,
   createTask,
+  dockTaskTimer,
   pinContentFromTask,
   taskClockText,
   toggleTaskDone,
@@ -150,11 +151,42 @@ describe('taskClockText', () => {
   });
 });
 
+describe('dockTaskTimer', () => {
+  it('picks the running timer over a paused one', () => {
+    const tasks = [task({id: 'task-a', remainingSeconds: 300}), task({id: 'task-b', timerRunning: true})];
+    expect(dockTaskTimer(tasks)?.id).toBe('task-b');
+  });
+
+  it('picks the first paused timer that has counted down', () => {
+    const tasks = [
+      task({id: 'task-a'}),
+      task({id: 'task-b', remainingSeconds: 300}),
+      task({id: 'task-c', remainingSeconds: 120}),
+    ];
+    expect(dockTaskTimer(tasks)?.id).toBe('task-b');
+  });
+
+  it('skips fresh, ran-out and done timers', () => {
+    const tasks = [
+      task({id: 'task-fresh', remainingSeconds: 600}),
+      task({id: 'task-out', remainingSeconds: 0}),
+      task({id: 'task-done', remainingSeconds: 300, completed: true}),
+    ];
+    expect(dockTaskTimer(tasks)).toBeNull();
+    expect(dockTaskTimer([])).toBeNull();
+  });
+});
+
 describe('pinContentFromTask', () => {
   it('joins the due label and note', () => {
     expect(
       pinContentFromTask(task({dueLabel: 'Fri', note: 'pages 4-12'})),
-    ).toEqual({title: 'Read chapter 4', body: 'Due: Fri — pages 4-12', surfaceLabel: 'Task Pin'});
+    ).toEqual({
+      title: 'Read chapter 4',
+      body: 'Due: Fri — pages 4-12',
+      surfaceLabel: 'Task Pin',
+      taskId: 'task-a',
+    });
   });
 
   it('uses the title as the body when there is nothing else', () => {
@@ -162,6 +194,7 @@ describe('pinContentFromTask', () => {
       title: 'Read chapter 4',
       body: 'Read chapter 4',
       surfaceLabel: 'Reminder Pin',
+      taskId: 'task-a',
     });
   });
 });

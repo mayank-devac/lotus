@@ -194,6 +194,9 @@ function sanitizePin(v: unknown): SpatialPin | null {
     title: text(v.title, 'Untitled pin') || 'Untitled pin',
     body: text(v.body),
     surfaceLabel: text(v.surfaceLabel, 'Room') || 'Room',
+    // The task a pin was placed for; task ids are validated the same way.
+    taskId:
+      typeof v.taskId === 'string' && SAFE_ID.test(v.taskId) ? v.taskId : undefined,
     color: safeColor(v.color),
     shapeStyle:
       v.shapeStyle === 'dot' || v.shapeStyle === 'revolving'

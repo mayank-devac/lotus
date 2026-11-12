@@ -35,6 +35,8 @@ export interface SpatialPin {
   title: string;
   body: string;
   surfaceLabel: string;
+  /** The task this pin was placed for, if any; in a headset its label then shows that task's running timer. A task that no longer exists is fine: the label just shows no clock. */
+  taskId?: string;
   color: string;
   shapeStyle?: PinShapeStyle;
   completed?: boolean;

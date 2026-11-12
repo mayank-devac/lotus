@@ -6,7 +6,7 @@ import {AppMode, FocusZoneBounds, LotusTask, SpatialHit, SpatialPin} from '../ty
 import type {LotusUI} from '../ui/LotusUI';
 
 /** The text a pin is created with. */
-export type PinContent = Pick<SpatialPin, 'title' | 'body' | 'surfaceLabel'>;
+export type PinContent = Pick<SpatialPin, 'title' | 'body' | 'surfaceLabel' | 'taskId'>;
 /** What the immersive session needs from the app that owns the data. */
 export interface ImmersiveHost {
   readonly pinManager: PinManager3D;

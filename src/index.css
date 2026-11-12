@@ -628,6 +628,55 @@ xrblocks-simulator-overlay-instructions {
   border-color: var(--ink);
 }
 
+/* Text buttons turned into compact icons to leave room for the task-timer pill. */
+.lotus-dock-btn.is-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.85rem 1rem;
+  line-height: 0;
+}
+
+.lotus-dock-btn.is-icon svg {
+  display: block;
+}
+
+/* The running / paused task timer pill between the icons and the FOCUS CTA. */
+.lotus-dock-task-pill {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: rgba(27, 27, 25, 0.74);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1.5px solid rgba(255, 255, 255, 0.32);
+  color: #ffffff;
+  padding: 0.85rem 1.15rem;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 0.86rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color 0.14s ease,
+    border-color 0.14s ease,
+    transform 0.14s ease;
+}
+
+.lotus-dock-task-pill:hover {
+  background: rgba(27, 27, 25, 0.9);
+  border-color: rgba(255, 255, 255, 0.6);
+  transform: translateY(-1px);
+}
+
+.lotus-dock-task-pill.is-running {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .lotus-dock-cta {
   pointer-events: auto;
   background: var(--accent);
@@ -2362,6 +2411,12 @@ xrblocks-simulator-overlay-instructions {
   .lotus-dock-btn {
     padding: 0.7rem 1rem;
   }
+
+  .lotus-dock-btn.is-icon,
+  .lotus-dock-task-pill {
+    padding: 0.7rem 0.85rem;
+  }
+
   .lotus-dock-cta {
     padding: 0.7rem 1.25rem;
   }
