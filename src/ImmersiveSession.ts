@@ -872,7 +872,7 @@ export class ImmersiveSession {
         this.runHudAction(hit.action);
         return;
       case 'chip':
-        this.ui.setHudHidden(false);
+        this.ui.setHudHidden(false, true);
         return;
       case 'drawer':
         this.runDrawerAction(hit.action);

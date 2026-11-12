@@ -459,7 +459,7 @@ export class XRInterface {
    * was. Shown again, the panel appears beside where the user is facing:
    * that is how a panel left behind in the room is brought back.
    */
-  public setHudHidden(hidden: boolean) {
+  public setHudHidden(hidden: boolean, inPlace = false) {
     if (this.hudHidden === hidden) return;
     this.hudHidden = hidden;
     this.hud.setVisible(!hidden);
@@ -470,7 +470,9 @@ export class XRInterface {
       this.chip.mesh.scale.setScalar(HUD_SCALE);
       this.chipKey = '';
     } else {
-      this.hudNeedsSnap = true;
+      // From the chip the panel opens exactly where the chip is; otherwise it
+      // is brought beside the user.
+      this.hudNeedsSnap = !inPlace;
       this.hudKey = '';
     }
   }
