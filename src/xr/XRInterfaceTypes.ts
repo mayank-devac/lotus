@@ -29,7 +29,7 @@ export type XRHudAction =
   | 'start-timer-only'
   | 'start-with-area'
   | 'start-cancel';
-export type XRChipAction = 'show-hud';
+export type XRChipAction = 'show-hud' | 'timer-pause';
 export type XRZoneAction = 'zone-confirm' | 'zone-cancel';
 export type XRDrawerTab = 'tasks' | 'pins' | 'settings';
 /**
@@ -103,6 +103,8 @@ export type XRCardAction =
 export interface XRHudState {
   clock: string;
   timerRunning: boolean;
+  /** True while the session clock is held (running, but paused). */
+  timerPaused: boolean;
   /** The running or paused task timer, with its MM:SS clock; null hides its button. */
   taskTimer: {clock: string; running: boolean} | null;
   mode: AppMode;

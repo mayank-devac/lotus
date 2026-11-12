@@ -662,6 +662,10 @@ export class LotusUI {
       case 'stop':
         this.shield.hide();
         break;
+      case 'pause':
+      case 'resume':
+        // The session stays; only the clock stopped or continued.
+        break;
     }
     this.renderAllPanels();
   }

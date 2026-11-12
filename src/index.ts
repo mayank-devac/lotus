@@ -104,12 +104,26 @@ class LotusSpatialApp extends xb.Script {
     lotusSound.enabled = this.settings.soundEnabled;
     this.timer = new FocusTimer(() => this.settings);
     // Whichever interface started or stopped it, the sound and the 3D scene
-    // follow the timer from here.
+    // follow the timer from here. A pause only holds the clock: the visuals
+    // (and the dimming) stay as they are.
     this.timer.subscribe((event) => {
-      if (event.type === 'tick') return;
-      if (event.type === 'start') lotusSound.playFocusStart();
-      else if (event.completed) lotusSound.playTimerComplete();
-      else lotusSound.playFocusStop();
+      switch (event.type) {
+        case 'tick':
+          return;
+        case 'pause':
+          lotusSound.playFocusStop();
+          return;
+        case 'resume':
+          lotusSound.playFocusStart();
+          return;
+        case 'start':
+          lotusSound.playFocusStart();
+          break;
+        case 'stop':
+          if (event.completed) lotusSound.playTimerComplete();
+          else lotusSound.playFocusStop();
+          break;
+      }
       this.syncFocusVisuals();
     });
 

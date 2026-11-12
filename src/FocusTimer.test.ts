@@ -67,6 +67,63 @@ describe('FocusTimer', () => {
     expect(timer.clockText()).toBe('24:00');
   });
 
+  it('holds and continues a stopwatch without losing time', () => {
+    timer.start(true);
+    vi.advanceTimersByTime(30_000);
+    expect(timer.clockText()).toBe('00:30');
+    expect(timer.pause()).toBe(true);
+    expect(timer.paused).toBe(true);
+    // Held: the interval is cleared, so time passes without ticks.
+    vi.advanceTimersByTime(60_000);
+    expect(timer.clockText()).toBe('00:30');
+    expect(timer.resume()).toBe(true);
+    expect(timer.paused).toBe(false);
+    vi.advanceTimersByTime(2_000);
+    expect(timer.clockText()).toBe('00:32');
+    expect(events).toContain('pause');
+    expect(events).toContain('resume');
+  });
+
+  it('holds and continues a countdown where it was', () => {
+    settings = {...settings, timerMode: 'preset', presetMinutes: 25};
+    timer.resetClock();
+    timer.start(true);
+    vi.advanceTimersByTime(60_000);
+    expect(timer.clockText()).toBe('24:00');
+    timer.pause();
+    vi.advanceTimersByTime(120_000);
+    timer.resume();
+    vi.advanceTimersByTime(1_000);
+    expect(timer.clockText()).toBe('23:59');
+  });
+
+  it('completes a countdown that ran past zero while it was held', () => {
+    settings = {...settings, timerMode: 'preset', presetMinutes: 1};
+    timer.resetClock();
+    const stops: boolean[] = [];
+    timer.subscribe((e) => e.type === 'stop' && stops.push(e.completed));
+    timer.start(true);
+    vi.advanceTimersByTime(59_000);
+    timer.pause();
+    // Held past the end: nothing happens until the clock continues.
+    vi.advanceTimersByTime(120_000);
+    expect(timer.clockText()).toBe('00:01');
+    timer.resume();
+    vi.advanceTimersByTime(2_000);
+    expect(timer.running).toBe(false);
+    expect(stops).toEqual([true]);
+  });
+
+  it('refuses pausing when idle, a second pause, and resuming a stopped clock', () => {
+    expect(timer.pause()).toBe(false);
+    timer.start(true);
+    timer.pause();
+    expect(timer.pause()).toBe(false);
+    timer.stop();
+    expect(timer.paused).toBe(false);
+    expect(timer.resume()).toBe(false);
+  });
+
   it('keeps time from the wall clock when ticks are late', () => {
     timer.start(true);
     // A throttled tab: the clock jumps, the interval fires once.

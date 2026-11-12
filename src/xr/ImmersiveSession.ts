@@ -427,6 +427,7 @@ export class ImmersiveSession {
       {
         clock: timer.clockText() || '00:00',
         timerRunning: timer.running,
+        timerPaused: timer.paused,
         taskTimer: taskTimerTask
           ? {
               clock: taskClockText(taskTimerTask),
@@ -533,6 +534,9 @@ export class ImmersiveSession {
         this.ui.setHudHidden(false);
         this.ui.flashStatus(event.completed ? 'Focus session complete' : 'Focus session ended');
         return;
+      case 'pause':
+      case 'resume':
+        return; // The session stays; the chip redraws from its key.
       case 'tick':
         return; // The panel reads the clock every frame.
     }
@@ -849,7 +853,15 @@ export class ImmersiveSession {
         this.runHudAction(hit.action);
         break;
       case 'chip':
-        this.ui.setHudHidden(false, true);
+        if (hit.action === 'timer-pause') {
+          // One button for the session clock, whichever mode it counts in:
+          // hold it here, continue it here. Ending stays on the panel.
+          const {timer} = this.host;
+          if (timer.paused) timer.resume();
+          else timer.pause();
+        } else {
+          this.ui.setHudHidden(false, true);
+        }
         break;
       case 'drawer':
         this.drawer.runAction(hit.action);

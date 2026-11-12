@@ -106,10 +106,11 @@ export class XRInterface {
 
   // Control panel (720 × 360 px at 0.36 × 0.18 m) and its hidden-state chip.
   private hud = new CanvasPanel<XRHudAction>(0.36, 0.18, 720, 360);
-  private chip = new CanvasPanel<XRChipAction>(0.15, 0.06, 300, 120);
+  private chip = new CanvasPanel<XRChipAction>(0.19, 0.06, 380, 120);
   private hudState: XRHudState = {
     clock: '00:00',
     timerRunning: false,
+    timerPaused: false,
     taskTimer: null,
     mode: 'explore',
     hint: '',
@@ -276,7 +277,7 @@ export class XRInterface {
     camera.getWorldPosition(_camPos);
 
     if (this.hudHidden) {
-      const key = `${state.clock}|${state.timerRunning}|${taskTimerKey(state.taskTimer)}|${this.chip.hoverKey()}`;
+      const key = `${state.clock}|${state.timerRunning}|${state.timerPaused}|${taskTimerKey(state.taskTimer)}|${this.chip.hoverKey()}`;
       if (key !== this.chipKey) {
         this.chipKey = key;
         this.hudState = state;
@@ -449,11 +450,24 @@ export class XRInterface {
           c.fillText(s.timerRunning ? s.clock : 'LOTUS', x + 104, y + h / 2 + 2);
         },
       },
-      4, 4, 292, 112,
+      4, 4, 258, 112,
     );
-    // Solid backdrop behind the translucent button colour.
+    // While a session runs, its clock can be held and continued right here,
+    // whichever mode it counts in; the panel stays hidden.
+    if (s.timerRunning) {
+      chip.drawButton(
+        'timer-pause',
+        s.timerPaused ? 'Resume the session clock' : 'Pause the session clock',
+        {icon: s.timerPaused ? 'play' : 'pause'},
+        266, 4, 110, 112,
+        {active: !s.timerPaused},
+      );
+    }
+    // Solid backdrop behind the translucent button colour, sized to the row:
+    // with a session running the pause button joins the chip (372px wide),
+    // without one only the eye button is there (258px).
     ctx.globalCompositeOperation = 'destination-over';
-    roundRectPath(ctx, 4, 4, 292, 112, 22);
+    roundRectPath(ctx, 4, 4, s.timerRunning ? 372 : 258, 112, 22);
     ctx.fillStyle = PANEL_BG;
     ctx.fill();
     ctx.globalCompositeOperation = 'source-over';
