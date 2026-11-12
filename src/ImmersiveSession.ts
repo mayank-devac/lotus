@@ -4,6 +4,8 @@ import * as xb from 'xrblocks';
 import {
   FocusVolume3D,
   focusZoneFromDrag,
+  focusZoneTopCentre,
+  focusZoneYawFacing,
   FOCUS_RAY_FALLBACK_METERS,
 } from './FocusVolume3D';
 import {LotusUI, PIN_COLOR_OPTIONS} from './LotusUI';
@@ -114,6 +116,8 @@ type XRGesture =
       plane: THREE.Plane;
       /** True for an area on a desk or floor, false for one on a wall. */
       onSurface: boolean;
+      /** The area faces the user: its sides run along and across their aim. */
+      yaw: number;
       moved: boolean;
     }
   | {
@@ -140,6 +144,18 @@ type XRTarget =
 interface TaskFormState extends TaskDraft {
   taskId: string | null;
 }
+
+/** A drawer action without its arguments: what comes before the first ':'. */
+type DrawerActionName = XRDrawerAction extends infer A
+  ? A extends `${infer N}:${string}`
+    ? N
+    : A
+  : never;
+/** The drawer actions `runTaskAction` handles; the others are handled in `runDrawerAction`. */
+type TaskActionName = Exclude<
+  DrawerActionName,
+  'move-drawer' | 'page-prev' | 'page-next' | 'pin' | 'pin-sort' | 'setting'
+>;
 
 const IDLE: XRGesture = {kind: 'idle'};
 /** A press becomes a drag once the ray travels this far or turns ~3°. */
@@ -201,7 +217,9 @@ const _turn = new THREE.Quaternion();
  */
 export class ImmersiveSession {
   private readonly ui = new XRInterface();
-  private readonly roomAnchor = new RoomAnchor();
+  private readonly roomAnchor = new RoomAnchor(() =>
+    this.notify('Could not find this room again. Pins and the focus area may be out of place.'),
+  );
   private readonly raycaster = new THREE.Raycaster();
   private xrSession: XRSession | null = null;
   private active = false;
@@ -237,6 +255,8 @@ export class ImmersiveSession {
   private pinSort: PinSortBy = 'proximity';
   /** Text for the next placed pin, when it is being placed for a task. */
   private pendingPinContent: PinContent | null = null;
+  /** Handed to the drawer every frame; one function, so that allocates nothing. */
+  private readonly getDrawerData = () => this.drawerData();
 
   // Text entry. `textEdit` is the edit the keyboard is open for: `apply`
   // saves the typed text, `alive` is false once what it edits has gone (card
@@ -497,7 +517,7 @@ export class ImmersiveSession {
     } else {
       pinManager.updatePreview(false);
     }
-    this.ui.updatePointers(this.rays.slice(0, controllers.length));
+    this.ui.updatePointers(this.rays, controllers.length);
 
     if (this.textEdit && !this.textEdit.alive()) this.closeEditor();
     const typing = this.ui.editor.isOpen();
@@ -511,10 +531,11 @@ export class ImmersiveSession {
         mode,
         hint: this.hint(mode),
         askingStart: this.askingStart,
+        exitArmed: this.armed?.key === 'exit-xr',
       },
       camera,
     );
-    if (this.ui.getDrawerTab()) this.ui.updateDrawer(this.drawerData());
+    this.ui.updateDrawer(this.getDrawerData);
     this.ui.updateZoneBar(camera, this.zoneBarAnchor(mode));
     this.ui.editor.update(camera);
 
@@ -588,6 +609,17 @@ export class ImmersiveSession {
       this.ui.setHudHidden(false);
       this.ui.flashStatus('Focus session ended');
     }
+  }
+
+  /**
+   * Tells the user something they did not ask about (a failed save, a room
+   * that was not recognised). Brings the control panel back if it is hidden,
+   * since the message shows on it. Outside a session it does nothing.
+   */
+  public notify(text: string) {
+    if (!this.active) return;
+    this.ui.setHudHidden(false);
+    this.ui.flashStatus(text, 8);
   }
 
   private toggleHud() {
@@ -697,7 +729,9 @@ export class ImmersiveSession {
       if (span > FOCUS_MAX_SPAN) {
         corner.sub(g.start).multiplyScalar(FOCUS_MAX_SPAN / span).add(g.start);
       }
-      this.host.previewFocusZone(focusZoneFromDrag(g.start, corner, g.onSurface));
+      this.host.previewFocusZone(
+        focusZoneFromDrag(g.start, corner, g.onSurface, 'room', g.yaw),
+      );
       this.zoneDrawn = true;
       return;
     }
@@ -862,6 +896,8 @@ export class ImmersiveSession {
   private runPanelAction(hit: XRPanelHit) {
     if (!hit.action) return; // Pressed the panel body: swallow the pinch.
     if (hit.panel === 'editor') {
+      // Keys do not change the drawer; text that is applied invalidates it
+      // where it is applied.
       lotusSound.playKeyTap();
       this.runEditorAction(hit.action);
       return;
@@ -870,20 +906,23 @@ export class ImmersiveSession {
     switch (hit.panel) {
       case 'hud':
         this.runHudAction(hit.action);
-        return;
+        break;
       case 'chip':
         this.ui.setHudHidden(false, true);
-        return;
+        break;
       case 'drawer':
         this.runDrawerAction(hit.action);
-        return;
+        break;
       case 'card':
         this.runCardAction(hit.action);
-        return;
+        break;
       case 'zone':
         this.runZoneAction(hit.action);
-        return;
+        break;
     }
+    // The drawer only looks at its data a few times a second; a press must
+    // show at once.
+    this.ui.invalidateDrawer();
   }
 
   /**
@@ -907,6 +946,8 @@ export class ImmersiveSession {
     if (action !== 'start-timer-only' && action !== 'start-with-area') {
       this.askingStart = false;
     }
+    // Any other button also withdraws a first press on Exit XR.
+    if (action !== 'exit-xr') this.armed = null;
     switch (action) {
       case 'toggle-timer':
         if (timer.getIsTimerRunning()) {
@@ -955,6 +996,8 @@ export class ImmersiveSession {
       case 'move-hud':
         return; // A drag, handled in selectStart.
       case 'exit-xr':
+        // Leaving ends the session, so it takes two presses like a delete.
+        if (!this.confirmTwice('exit-xr')) return;
         void this.xrSession?.end();
         return;
     }
@@ -1013,6 +1056,7 @@ export class ImmersiveSession {
       start,
       plane: new THREE.Plane().setFromNormalAndCoplanarPoint(normal, start),
       onSurface,
+      yaw: focusZoneYawFacing(ray.direction),
       moved: false,
     };
   }
@@ -1025,9 +1069,9 @@ export class ImmersiveSession {
   /** Top centre of the area being set, in world space; null when there is none to confirm. */
   private zoneBarAnchor(mode: AppMode): THREE.Vector3 | null {
     if (mode !== 'focus-drag' || !this.canConfirmZone()) return null;
-    const {min, max} = this.host.getFocusZone();
-    _zonePoint.set((min.x + max.x) / 2, max.y, (min.z + max.z) / 2);
-    return this.host.worldRoot.localToWorld(_zonePoint);
+    return this.host.worldRoot.localToWorld(
+      focusZoneTopCentre(this.host.getFocusZone(), _zonePoint),
+    );
   }
 
   private runZoneAction(action: XRZoneAction) {
@@ -1067,7 +1111,10 @@ export class ImmersiveSession {
 
   private runDrawerAction(action: XRDrawerAction) {
     if (action !== 'task-delete') this.armed = null;
-    const [name, id, direction] = action.split(':');
+    const [first, id, direction] = action.split(':');
+    // Safe: `action` is an XRDrawerAction, and DrawerActionName is by
+    // definition what those have before their first ':'.
+    const name = first as DrawerActionName;
     switch (name) {
       case 'move-drawer':
         return; // A drag, handled in selectStart.
@@ -1087,11 +1134,13 @@ export class ImmersiveSession {
         this.changeSetting(id, direction === 'prev' ? -1 : 1);
         return;
       default:
+        // `name` is narrowed to what is left: a case removed above, or a new
+        // drawer action handled nowhere, fails to compile here or below.
         this.runTaskAction(name, id);
     }
   }
 
-  private runTaskAction(name: string, taskId: string | undefined) {
+  private runTaskAction(name: TaskActionName, taskId: string | undefined) {
     const tasks = this.host.getTasks();
     const openTask = tasks.find((t) => t.id === this.openTaskId);
     switch (name) {
@@ -1197,6 +1246,9 @@ export class ImmersiveSession {
         this.commitTextEdit();
         this.saveTaskForm();
         return;
+      default:
+        // Does not compile when a drawer action is handled nowhere.
+        name satisfies never;
     }
   }
 
@@ -1509,6 +1561,7 @@ export class ImmersiveSession {
     const edit = this.textEdit;
     if (!edit || !this.ui.editor.isOpen() || !edit.alive()) return;
     edit.apply(this.ui.editor.getText().trim());
+    this.ui.invalidateDrawer();
   }
 
   /** Stops dictation and the headset keyboard, whichever is running. */
@@ -1533,6 +1586,8 @@ export class ImmersiveSession {
         const text = editor.getText().trim();
         this.closeEditor();
         apply?.(text);
+        // A task form's field shows the new text at once.
+        this.ui.invalidateDrawer();
         return;
       }
       case 'cancel':

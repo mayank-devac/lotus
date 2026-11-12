@@ -5,6 +5,7 @@ import {dictateOnce, isSpeechSupported} from './speech';
 import {ROOM_WAYPOINTS, getShieldStrength, vec3} from './storage';
 import {
   TASK_TIMER_PRESETS_MIN,
+  advanceTaskTimers,
   createTask,
   pinContentFromTask,
   taskClockText,
@@ -162,6 +163,8 @@ export class LotusUI {
   private modalLayerEl!: HTMLElement;
   private topBarEl!: HTMLElement;
   private modeToastEl!: HTMLElement;
+  /** A message waiting in the banner; see `showNotice`. */
+  private noticeText = '';
   private bottomDockEl!: HTMLElement;
   private dragBoxOverlayEl!: HTMLElement;
   private pinPlacementReticleEl!: HTMLElement;
@@ -207,39 +210,24 @@ export class LotusUI {
     if (this.taskTickerIntervalId !== null) {
       window.clearInterval(this.taskTickerIntervalId);
     }
+    // Count from the wall clock, not from ticks: browsers throttle intervals
+    // (background tabs, busy XR frames), and a tick-counted timer runs slow.
+    let countedUntil = Date.now();
     this.taskTickerIntervalId = window.setInterval(() => {
-      let anyUpdated = false;
-      let anyCompletedByTimer = false;
-      this.tasks = this.tasks.map((t) => {
-        if (!t.completed && t.timerRunning) {
-          const cur =
-            t.remainingSeconds ?? t.timerSeconds ?? this.settings.presetMinutes * 60;
-          const next = Math.max(0, cur - 1);
-          anyUpdated = true;
-          if (next === 0) {
-            anyCompletedByTimer = true;
-            return {
-              ...t,
-              remainingSeconds: 0,
-              timerRunning: false,
-            };
-          }
-          return {
-            ...t,
-            remainingSeconds: next,
-          };
-        }
-        return t;
-      });
-
-      if (anyCompletedByTimer) {
+      const wholeSeconds = Math.floor((Date.now() - countedUntil) / 1000);
+      if (wholeSeconds < 1) return;
+      countedUntil += wholeSeconds * 1000;
+      const step = advanceTaskTimers(this.tasks, wholeSeconds);
+      if (!step.changed) return;
+      this.tasks = step.tasks;
+      if (step.finished) {
         lotusSound.playTimerComplete();
         this.callbacks.onSaveTasks(this.tasks);
         this.renderAllPanels();
-      } else if (anyUpdated) {
+      } else {
         this.updateTaskTimerDOMReadouts();
       }
-    }, 1000);
+    }, 250);
   }
 
   public formatTaskTimer(task: LotusTask): string {
@@ -1008,13 +996,14 @@ export class LotusUI {
 
   /**
    * `withArea` false runs only the clock: nothing around the focus area is
-   * dimmed. By default the "Start focus" setting decides.
+   * dimmed. By default the "Start focus" setting decides. A stopwatch session
+   * always starts from zero, while a stopped countdown resumes where it was.
    */
   public startFocusTimer(withArea = this.settings.focusStart !== 'timer') {
     if (this.isTimerRunning) return;
     this.timerUsesArea = withArea;
     if (
-      this.settings.timerMode !== 'stopwatch' &&
+      this.settings.timerMode === 'stopwatch' ||
       this.timerRemainingSec <= 0
     ) {
       this.resetTimerClockFromSettings();
@@ -1437,7 +1426,32 @@ export class LotusUI {
       return;
     }
 
+    if (this.noticeText) {
+      this.modeToastEl.innerHTML = `
+        <div class="lotus-banner-pill">
+          <span>${this.escapeHtml(this.noticeText)}</span>
+          <button type="button" id="banner-dismiss-notice" class="lotus-banner-action">OK</button>
+        </div>
+      `;
+      this.modeToastEl
+        .querySelector('#banner-dismiss-notice')
+        ?.addEventListener('click', () => {
+          this.noticeText = '';
+          this.renderAllPanels();
+        });
+      return;
+    }
+
     this.modeToastEl.innerHTML = '';
+  }
+
+  /**
+   * Shows a message in the banner until the user dismisses it. For things the
+   * user must know but did not ask about, such as a failed save.
+   */
+  public showNotice(text: string) {
+    this.noticeText = text;
+    this.renderAllPanels();
   }
 
   private renderModals() {

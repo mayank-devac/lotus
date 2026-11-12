@@ -21,6 +21,13 @@ export class RoomAnchor {
   private anchor: XRAnchor | null = null;
   private state: AnchorState = 'idle';
 
+  /**
+   * `onRoomLost` runs when the saved anchor could not be found again. Room
+   * content then starts over from the current origin, so pins and the focus
+   * area may be out of place and the user should be told.
+   */
+  constructor(private readonly onRoomLost: () => void = () => {}) {}
+
   public begin(session: XRSession) {
     this.session = session;
     this.anchor = null;
@@ -42,6 +49,7 @@ export class RoomAnchor {
         // start a fresh one at the current origin.
         this.clearStoredHandle();
         this.state = 'idle';
+        this.onRoomLost();
       });
   }
 

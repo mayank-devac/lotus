@@ -43,9 +43,23 @@ export interface SpatialPin {
   createdAt: number;
 }
 
+/**
+ * Where a focus zone's box came from: the built-in placeholder, a rectangle
+ * dragged on a 2D screen (its box is only meaningful to that screen), or an
+ * area marked out in the real room inside a headset.
+ */
+export type FocusZoneSource = 'default' | 'screen' | 'room';
+
 export interface FocusZoneBounds {
   defined: boolean;
   label: string;
+  source: FocusZoneSource;
+  /**
+   * Radians the box is turned about the vertical axis. `min` and `max` are
+   * corners in that turned frame, so the box lines up with the desk or wall
+   * it was dragged on rather than with the room's arbitrary axes.
+   */
+  yaw: number;
   min: Vector3Data;
   max: Vector3Data;
   customScreenRect?: ProjectedRect | null;

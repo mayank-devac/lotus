@@ -64,6 +64,30 @@ export function toggleTaskTimer(tasks: LotusTask[], taskId: string): LotusTask[]
   });
 }
 
+/**
+ * Takes `seconds` off every running task timer. A timer that reaches zero
+ * stops. `changed` is false when no timer was running, and `finished` is
+ * true when at least one timer ran out in this step.
+ */
+export function advanceTaskTimers(
+  tasks: LotusTask[],
+  seconds: number,
+): {tasks: LotusTask[]; changed: boolean; finished: boolean} {
+  let changed = false;
+  let finished = false;
+  const next = tasks.map((t) => {
+    if (t.completed || !t.timerRunning) return t;
+    changed = true;
+    const left = Math.max(
+      0,
+      (t.remainingSeconds ?? t.timerSeconds ?? DEFAULT_TASK_TIMER_SEC) - seconds,
+    );
+    if (left === 0) finished = true;
+    return {...t, remainingSeconds: left, timerRunning: left > 0};
+  });
+  return {tasks: changed ? next : tasks, changed, finished};
+}
+
 /** Remaining time on a task's timer as MM:SS. */
 export function taskClockText(task: LotusTask): string {
   const sec = task.remainingSeconds ?? task.timerSeconds ?? DEFAULT_TASK_TIMER_SEC;

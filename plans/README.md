@@ -14,9 +14,9 @@ findings are listed below and have no plan yet.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
-| 001  | The headset focus dim has no clear hole behind the user | P1 | S | — | TODO |
-| 002  | A focus area drawn on a 2D screen is never used as a room area in the headset | P1 | M | — | TODO |
-| 003  | Task timers count real time, not interval ticks | P2 | S | — | TODO |
+| 001  | The headset focus dim has no clear hole behind the user | P1 | S | — | DONE (uncommitted; not run in a headset) |
+| 002  | A focus area drawn on a 2D screen is never used as a room area in the headset | P1 | M | — | DONE (uncommitted; `focusZoneFromDrag` also takes a `yaw`; not run in a headset) |
+| 003  | Task timers count real time, not interval ticks | P2 | S | — | DONE (uncommitted; not run in a browser) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale)
 
@@ -33,49 +33,45 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
 - There is no test suite. Every plan therefore ends in a typecheck, a build
   and a listed manual check.
 
-## Findings without a plan yet
+## Fixed directly on 2026-11-12 (uncommitted, typecheck and build pass)
+
+- Stopwatch focus sessions start from zero; a stopped countdown still resumes.
+- A failed anchor restore now tells the user on the control panel. The
+  stored handle is still replaced (see the open item below).
+- The focus area is turned to face the user who dragged it (`yaw` on
+  `FocusZoneBounds`, migrated to 0 for old data).
+- The dim shell is not drawn at zero strength.
+- Drawer data is pulled a few times a second, not every frame; label and
+  pointer updates no longer allocate per frame.
+- Drawer actions are typed end to end; an unhandled one is a compile error.
+- A failed save shows a notice on the 2D banner and the headset panel.
+- "Exit XR" needs two presses.
+
+## Findings still open
 
 Vetted against the code; ask for a plan for any of them.
 
-- **Stop is pause, and nothing resets the focus clock**
-  (`src/LotusUI.ts:1013-1057`). The stopwatch (the default mode) keeps
-  adding to the previous session; a stopped countdown resumes. Neither the
-  2D screen nor the headset has a reset. The product spec mentions
-  "resetting the timer". Needs a product decision.
-- **A failed anchor restore deletes the room's stored anchor**
-  (`src/RoomAnchor.ts:39-45`). Any rejection of `restorePersistentAnchor`
-  clears the handle and re-anchors at the current origin with no message, so
-  pins and the focus area silently move. Needs a check on a Quest of when
-  the restore rejects (other room, tracking not ready) before a fix.
-- **The focus area is an axis-aligned box in room space**
-  (`src/FocusVolume3D.ts:120-145`). The room axes come from where the first
-  session happened to face, so a desk at an angle gets a box that does not
-  match the dragged rectangle. Fix is a stored yaw (schema change).
+- **A failed anchor restore still replaces the room's stored anchor**
+  (`src/RoomAnchor.ts`). The user is now told, but visiting another room
+  still drops the first room's anchor. Needs a check on a Quest of when
+  `restorePersistentAnchor` rejects; the real fix is one anchor and one pin
+  set per room.
 - **Surface or wall is decided by ray pitch, not the surface hit**
-  (`src/ImmersiveSession.ts:1000`, `src/index.ts:541` discards the hit
-  normal). A desk aimed at from a shallow angle becomes a "wall" area.
+  (`startFocusDrag` in `src/ImmersiveSession.ts`). The depth mesh reports a
+  single-triangle normal in mesh space from a coarse grid; too noisy to
+  trust without testing on a device.
 - **The dim vanishes when the head is inside the focus box**, and virtual
   content beyond the 4 m dim sphere is dimmed while nearer content is not
-  (`src/FocusVolume3D.ts:83-99`, `:224`).
-- **Structure**: `src/LotusUI.ts` (3,779 lines) owns the focus timer, the
-  live task list and settings, and the headset reaches them through the DOM
-  class (`ImmersiveHost.ui`, `src/ImmersiveSession.ts:58-66`).
-  `src/ImmersiveSession.ts` (1,617) and `src/XRInterface.ts` (1,584) are
-  also past 1,000 lines. Recommended first cut: a `FocusTimer` module owned
-  by `src/index.ts` that both interfaces subscribe to.
-- **Stringly-typed drawer actions**: `runDrawerAction` splits the typed
-  action on `:` and hands a plain `string` to `runTaskAction`
-  (`src/ImmersiveSession.ts:1068-1201`), so an unhandled action is silently
-  ignored.
-- **Per-frame allocation in the headset loop**: the drawer rebuilds its data
-  and a JSON key every frame while open (`src/ImmersiveSession.ts:517`,
-  `src/XRInterface.ts:700-733`); `updateLabels` does a `pins.find` per pin
-  and a new `Set` per frame (`src/XRInterface.ts:1442-1445`).
-- **Silent storage failures**: every save swallows errors
-  (`src/storage.ts:234-240` and the other savers), so a full or blocked
-  `localStorage` loses data with no message.
-- **"Exit XR" acts on one press** while deletes need two
-  (`src/XRInterface.ts:635`).
+  (`src/FocusVolume3D.ts`). Product decision.
+- **A room-anchored focus area on the 2D screen** is projected through the
+  2D view's made-up camera.
+- **Structure**: `src/LotusUI.ts` (about 3,800 lines) owns the focus timer,
+  the live task list and settings, and the headset reaches them through the
+  DOM class (`ImmersiveHost.ui`). `src/ImmersiveSession.ts` and
+  `src/XRInterface.ts` are also past 1,000 lines. Recommended first cut: a
+  `FocusTimer` module owned by `src/index.ts` that both interfaces
+  subscribe to. Not attempted: there is no test suite to protect a refactor
+  of that size.
 
 ## Findings considered and rejected
 

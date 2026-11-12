@@ -1,8 +1,10 @@
 import {
   FocusStartMode,
   FocusZoneBounds,
+  FocusZoneSource,
   LotusSettings,
   LotusTask,
+  ProjectedRect,
   RoomWaypoint,
   SpatialPin,
   TimerMode,
@@ -51,6 +53,8 @@ export const DEFAULT_PINS: SpatialPin[] = [
 export const DEFAULT_FOCUS_ZONE: FocusZoneBounds = {
   defined: true,
   label: 'Study Desk Area',
+  source: 'default',
+  yaw: 0,
   min: vec3(-0.65, 0.75, -1.75),
   max: vec3(0.65, 1.55, -1.1),
 };
@@ -89,9 +93,9 @@ export function isPristineSamplePin(pin: SpatialPin): boolean {
   );
 }
 
-/** The focus zone still holds the made-up default rather than a real spot. */
-export function isDefaultFocusZone(zone: FocusZoneBounds): boolean {
-  return !zone.defined || zone.label === DEFAULT_FOCUS_ZONE.label;
+/** The zone was marked out in the real room, so a headset can use it. */
+export function isRoomFocusZone(zone: FocusZoneBounds): boolean {
+  return zone.defined && zone.source === 'room';
 }
 
 /** How strongly the surroundings are hidden while focusing, 0 (clear) to 1. */
@@ -153,6 +157,30 @@ function readVec3(v: unknown): Vector3Data | null {
 /** Only `#rgb`, `#rrggbb` or `#rrggbbaa`; anything else falls back. */
 export function safeColor(v: unknown, fallback = '#E84D2B'): string {
   return typeof v === 'string' && HEX_COLOR.test(v) ? v : fallback;
+}
+
+let storageFailureListener: (() => void) | null = null;
+let storageFailureReported = false;
+
+/**
+ * Registers what to do when saving fails (storage full, or blocked in a
+ * private window). It is called once: after the first failure the user has
+ * been told, and repeating it on every save would only be noise.
+ */
+export function onStorageFailure(listener: () => void): void {
+  storageFailureListener = listener;
+}
+
+/** The one place that writes to storage, so a failed save is never silent. */
+function writeStored(key: string, value: unknown): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (error) {
+    if (storageFailureReported) return;
+    storageFailureReported = true;
+    console.warn('LOTUS could not save to this browser\'s storage.', error);
+    storageFailureListener?.();
+  }
 }
 
 function sanitizePin(v: unknown): SpatialPin | null {
@@ -232,11 +260,7 @@ export function loadSavedPins(): SpatialPin[] {
 }
 
 export function savePinsToStorage(pins: SpatialPin[]): void {
-  try {
-    localStorage.setItem(PINS_STORAGE_KEY, JSON.stringify(pins));
-  } catch {
-    // Ignore storage quota errors
-  }
+  writeStored(PINS_STORAGE_KEY, pins);
 }
 
 export function loadSavedTasks(): LotusTask[] {
@@ -259,11 +283,39 @@ export function loadSavedTasks(): LotusTask[] {
 }
 
 export function saveTasksToStorage(tasks: LotusTask[]): void {
-  try {
-    localStorage.setItem(TASKS_STORAGE_KEY, JSON.stringify(tasks));
-  } catch {
-    // Ignore storage quota errors
+  writeStored(TASKS_STORAGE_KEY, tasks);
+}
+
+const FOCUS_ZONE_SOURCES: FocusZoneSource[] = ['default', 'screen', 'room'];
+
+/**
+ * Zones saved before `source` existed are told apart by what each writer
+ * left behind: the default kept its label, a 2D drag always stored a
+ * visible screen rectangle, and a headset confirm cleared that rectangle.
+ */
+function readFocusZoneSource(parsed: Record<string, unknown>): FocusZoneSource {
+  const stored = FOCUS_ZONE_SOURCES.find((s) => s === parsed.source);
+  if (stored) return stored;
+  if (parsed.defined !== true || parsed.label === DEFAULT_FOCUS_ZONE.label) {
+    return 'default';
   }
+  const rect = parsed.customScreenRect;
+  return isRecord(rect) && rect.visible === true ? 'screen' : 'room';
+}
+
+function readScreenRect(v: unknown): ProjectedRect | null {
+  if (!isRecord(v) || typeof v.visible !== 'boolean') return null;
+  const {x, y, width, height} = v;
+  if (![x, y, width, height].every((n) => typeof n === 'number' && Number.isFinite(n))) {
+    return null;
+  }
+  return {
+    visible: v.visible,
+    x: x as number,
+    y: y as number,
+    width: width as number,
+    height: height as number,
+  };
 }
 
 export function loadFocusZone(): FocusZoneBounds {
@@ -276,10 +328,14 @@ export function loadFocusZone(): FocusZoneBounds {
       const max = readVec3(parsed.max);
       if (min && max) {
         return {
-          ...(parsed as unknown as FocusZoneBounds),
+          defined: parsed.defined,
           label: text(parsed.label, DEFAULT_FOCUS_ZONE.label),
+          source: readFocusZoneSource(parsed),
+          // Zones saved before `yaw` existed lie along the room's axes.
+          yaw: finite(parsed.yaw, 0),
           min,
           max,
+          customScreenRect: readScreenRect(parsed.customScreenRect),
         };
       }
     }
@@ -290,11 +346,7 @@ export function loadFocusZone(): FocusZoneBounds {
 }
 
 export function saveFocusZoneToStorage(zone: FocusZoneBounds): void {
-  try {
-    localStorage.setItem(FOCUS_STORAGE_KEY, JSON.stringify(zone));
-  } catch {
-    // Ignore storage errors
-  }
+  writeStored(FOCUS_STORAGE_KEY, zone);
 }
 
 const TIMER_MODES: TimerMode[] = ['preset', 'custom', 'stopwatch'];
@@ -329,9 +381,5 @@ export function loadLotusSettings(): LotusSettings {
 }
 
 export function saveLotusSettings(settings: LotusSettings): void {
-  try {
-    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
-  } catch {
-    // Ignore storage errors
-  }
+  writeStored(SETTINGS_STORAGE_KEY, settings);
 }

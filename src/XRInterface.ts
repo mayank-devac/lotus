@@ -120,6 +120,8 @@ export interface XRHudState {
   hint: string;
   /** Play was pressed: show the timer-only / focus-area choice instead of the buttons. */
   askingStart: boolean;
+  /** Exit XR was pressed once and is waiting for its confirming second press. */
+  exitArmed: boolean;
 }
 
 /** The panels a grip can move. The drawer moves with the control panel. */
@@ -153,7 +155,7 @@ export interface XRSettingRow {
   swatch?: string;
 }
 
-/** What the drawer shows; supplied every frame while it is open. */
+/** What the drawer shows; asked for a few times a second while it is open. */
 export interface XRDrawerData {
   /** Already filtered and ordered for display. */
   tasks: XRTaskRow[];
@@ -236,6 +238,12 @@ const DRAWER_FOOTER_Y = 572;
 const DRAWER_FOOTER_H = 84;
 const LIST_ROWS_PER_PAGE = 4;
 const SETTING_ROWS_PER_PAGE = 5;
+/**
+ * How often (ms) the open drawer asks for its data when nothing told it to.
+ * Clocks and distances change on their own, but only a few times a second:
+ * asking every frame filled the headset's garbage collector for nothing.
+ */
+const DRAWER_REFRESH_MS = 120;
 
 const _camPos = new THREE.Vector3();
 const _forward = new THREE.Vector3();
@@ -294,6 +302,7 @@ export class XRInterface {
     mode: 'explore',
     hint: '',
     askingStart: false,
+    exitArmed: false,
   };
   private hudStatus = '';
   private flashText = '';
@@ -309,6 +318,9 @@ export class XRInterface {
   private drawerPage = 0;
   private drawerKey = '';
   private drawerData: XRDrawerData | null = null;
+  /** The drawer's hover and the time when its data was last asked for. */
+  private drawerHoverKey = '';
+  private drawerRefreshedAt = 0;
 
   // Pin card.
   private card = new CanvasPanel<XRCardAction>(0.36, 0.3, 720, 600);
@@ -328,6 +340,9 @@ export class XRInterface {
   private zoneBarKey = '';
 
   private labels = new Map<string, PinLabel>();
+  // Reused by updateLabels every frame, so it allocates nothing there.
+  private labelPins = new Map<string, SpatialPin>();
+  private liveLabelIds = new Set<string>();
   private pointers: PointerVisual[] = [];
   private pointerLineGeo: THREE.BufferGeometry;
   private pointerLineMat: THREE.LineBasicMaterial;
@@ -432,7 +447,7 @@ export class XRInterface {
       this.closeCard();
       this.setDrawerTab(null);
       this.zoneBar.setVisible(false);
-      this.updatePointers([]);
+      this.updatePointers([], 0);
       for (const label of this.labels.values()) {
         label.opacity = 0;
         label.sprite.visible = false;
@@ -527,7 +542,7 @@ export class XRInterface {
       this.hud.hoveredLabel() ??
       this.drawer.hoveredLabel() ??
       (this.flashText && performance.now() < this.flashUntil ? this.flashText : state.hint);
-    const key = `${state.clock}|${state.timerRunning}|${state.mode}|${state.askingStart}|${status}|${this.hud.hoverKey()}|${this.drawerTab}`;
+    const key = `${state.clock}|${state.timerRunning}|${state.mode}|${state.askingStart}|${state.exitArmed}|${status}|${this.hud.hoverKey()}|${this.drawerTab}`;
     if (key !== this.hudKey) {
       this.hudKey = key;
       this.hudState = state;
@@ -632,9 +647,13 @@ export class XRInterface {
     hud.drawButton('tab-settings', 'Settings', {icon: 'settings'}, next(), y, w, h, {
       active: this.drawerTab === 'settings',
     });
-    hud.drawButton('exit-xr', 'Exit XR', {icon: 'exit'}, next(), y, w, h, {
-      danger: true,
-    });
+    hud.drawButton(
+      'exit-xr',
+      s.exitArmed ? 'Press again to exit XR' : 'Exit XR',
+      {icon: s.exitArmed ? 'check' : 'exit'},
+      next(), y, w, h,
+      {danger: true, armed: s.exitArmed},
+    );
     hud.commit();
   }
 
@@ -686,11 +705,33 @@ export class XRInterface {
     this.drawerKey = '';
   }
 
-  /** Redraws the drawer when what it shows has changed. */
-  public updateDrawer(data: XRDrawerData) {
+  /** Makes the next `updateDrawer` ask for fresh data and redraw, e.g. after a press. */
+  public invalidateDrawer() {
+    this.drawerKey = '';
+  }
+
+  /**
+   * Redraws the drawer when what it shows has changed. Called every frame,
+   * but `getData` is only called when the drawer was invalidated, its hover
+   * changed, or DRAWER_REFRESH_MS passed: building the data and its key
+   * allocates, and at frame rate that kept the garbage collector busy.
+   */
+  public updateDrawer(getData: () => XRDrawerData) {
     if (!this.drawerTab || this.hudHidden) return;
+    const hover = this.drawer.hoverKey();
+    const now = performance.now();
+    if (
+      this.drawerKey !== '' &&
+      hover === this.drawerHoverKey &&
+      now - this.drawerRefreshedAt < DRAWER_REFRESH_MS
+    ) {
+      return;
+    }
+    this.drawerHoverKey = hover;
+    this.drawerRefreshedAt = now;
+    const data = getData();
     this.drawerData = data;
-    const key = `${this.drawerTab}|${this.drawerPage}|${this.drawer.hoverKey()}|${this.drawerContentKey(data)}`;
+    const key = `${this.drawerTab}|${this.drawerPage}|${hover}|${this.drawerContentKey(data)}`;
     if (key === this.drawerKey) return;
     this.drawerKey = key;
     this.drawDrawer();
@@ -1439,10 +1480,18 @@ export class XRInterface {
     hoveredPinId: string | null,
     delta: number,
   ) {
-    const live = new Set<string>();
+    // One lookup table per call instead of a search through the pins for
+    // every projection; both collections are reused between frames.
+    const pinById = this.labelPins;
+    pinById.clear();
+    // Filled back to front so that, like a search from the start, the first
+    // pin with an id wins.
+    for (let i = pins.length - 1; i >= 0; i--) pinById.set(pins[i].id, pins[i]);
+    const live = this.liveLabelIds;
+    live.clear();
     const fade = 1 - Math.exp(-LABEL_FADE_RATE * delta);
     for (const proj of projections) {
-      const pin = pins.find((p) => p.id === proj.id);
+      const pin = pinById.get(proj.id);
       if (!pin) continue;
       live.add(pin.id);
       const wanted =
@@ -1487,6 +1536,8 @@ export class XRInterface {
       label.texture.dispose();
       this.labels.delete(id);
     }
+    // Do not hold on to pins that may be deleted before the next call.
+    pinById.clear();
   }
 
   private createLabel(): PinLabel {
@@ -1531,8 +1582,13 @@ export class XRInterface {
   // Aiming rays
   // ---------------------------------------------------------------------------
 
-  public updatePointers(rays: XRPointerRay[]) {
-    while (this.pointers.length < rays.length) {
+  /**
+   * Draws the first `count` rays of `rays` and hides every other pointer. The
+   * count is separate so the caller can reuse one array without slicing it
+   * each frame.
+   */
+  public updatePointers(rays: XRPointerRay[], count: number) {
+    while (this.pointers.length < count) {
       const line = new THREE.Line(this.pointerLineGeo, this.pointerLineMat);
       line.frustumCulled = false;
       const dot = new THREE.Mesh(this.pointerDotGeo, this.pointerDotMat);
@@ -1541,7 +1597,7 @@ export class XRInterface {
       this.pointers.push({line, dot});
     }
     this.pointers.forEach((pointer, i) => {
-      const ray = rays[i];
+      const ray = i < count ? rays[i] : undefined;
       if (!ray) {
         pointer.line.visible = false;
         pointer.dot.visible = false;

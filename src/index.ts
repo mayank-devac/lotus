@@ -13,12 +13,13 @@ import {lotusSound} from './sound';
 import {
   DEFAULT_FOCUS_ZONE,
   getShieldStrength,
-  isDefaultFocusZone,
   isPristineSamplePin,
+  isRoomFocusZone,
   loadFocusZone,
   loadLotusSettings,
   loadSavedPins,
   loadSavedTasks,
+  onStorageFailure,
   saveFocusZoneToStorage,
   saveLotusSettings,
   savePinsToStorage,
@@ -213,7 +214,7 @@ class LotusSpatialApp extends xb.Script {
       raycastSpatialPoint: (raycaster, fallbackDistance) =>
         this.raycastSpatialPoint(raycaster, fallbackDistance),
       getFocusZone: () => this.focusZone,
-      focusZoneNeedsDefining: () => isDefaultFocusZone(this.focusZone),
+      focusZoneNeedsDefining: () => !isRoomFocusZone(this.focusZone),
       previewFocusZone: (zone) => {
         this.focusZone = zone;
         this.focusVolume.setBounds(zone);
@@ -228,6 +229,14 @@ class LotusSpatialApp extends xb.Script {
       },
     });
     this.add(this.immersive.root);
+
+    // A save that fails (storage full, or blocked) must not pass silently:
+    // say so on whichever interface the user is looking at.
+    onStorageFailure(() => {
+      const text = 'Could not save. Storage is full or blocked, so changes may be lost.';
+      this.ui.showNotice(text);
+      this.immersive.notify(text);
+    });
 
     this.bindPointerAndKeyboardEvents();
   }
@@ -366,10 +375,11 @@ class LotusSpatialApp extends xb.Script {
     // A timer-only session leaves the room undimmed.
     const running = this.ui.getTimerUsesArea();
     const presenting = this.isXRPresenting();
-    // In a headset the made-up default zone is an arbitrary spot in the room,
-    // so its frame only shows once the user has marked out a real one.
+    // In a headset a zone that was not marked out in the room (the default,
+    // or one dragged on a 2D screen) is an arbitrary spot, so the frame only
+    // shows once the user has marked out a real one.
     const showFrame = presenting
-      ? !isDefaultFocusZone(this.focusZone)
+      ? isRoomFocusZone(this.focusZone)
       : this.settings.showVirtualRoom;
     this.focusVolume.setFocusTimerState(
       running && this.settings.showVirtualRoom,
@@ -377,7 +387,7 @@ class LotusSpatialApp extends xb.Script {
       this.mode === 'focus-drag' && showFrame,
     );
     this.focusVolume.setXRDim(
-      presenting && running && !isDefaultFocusZone(this.focusZone),
+      presenting && running && isRoomFocusZone(this.focusZone),
       getShieldStrength(this.settings),
       this.settings.shieldStyle,
     );

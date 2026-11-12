@@ -1,12 +1,16 @@
 import * as THREE from 'three';
 import {
   FocusZoneBounds,
+  FocusZoneSource,
   ProjectedRect,
   ShieldStyle,
   Vector3Data,
 } from './types';
 
 const _corner = new THREE.Vector3();
+const _dragA = new THREE.Vector3();
+const _dragB = new THREE.Vector3();
+const UP = new THREE.Vector3(0, 1, 0);
 
 /** Colour of the in-headset peripheral dim for each shield style. */
 const DIM_TINT: Record<ShieldStyle, number> = {
@@ -50,10 +54,12 @@ const DIM_FRAGMENT_SHADER = /* glsl */ `
   }
 
   /**
-   * Smallest box distance along the ray. That function is convex in t, so a
-   * short shrinking-step descent from the point closest to the centre finds
-   * the global minimum — exact enough for grazing rays too, which is what
-   * keeps the window's corners from rounding off.
+   * Smallest box distance along the forward ray (t >= 0). That function is
+   * convex in t, so a short shrinking-step descent from the point closest to
+   * the centre finds the minimum — exact enough for grazing rays too, which
+   * is what keeps the window's corners from rounding off. Only the forward
+   * half counts: the full line through the eye also passes through the box
+   * behind the user, which would leave a clear window opposite the zone.
    */
   float rayBoxDistance(vec3 rayOrigin, vec3 rayDir) {
     vec3 extents = max(uFocusHalfExtents, vec3(0.18));
@@ -61,14 +67,15 @@ const DIM_FRAGMENT_SHADER = /* glsl */ `
       max(abs(rayDir.x) / extents.x, abs(rayDir.y) / extents.y),
       abs(rayDir.z) / extents.z
     );
-    float t = dot(uFocusCenter - rayOrigin, rayDir);
+    float t = max(dot(uFocusCenter - rayOrigin, rayDir), 0.0);
     float s = 1.0 / max(slope, 1e-4);
     float d = boxDistanceAt(rayOrigin + rayDir * t, extents);
     for (int i = 0; i < 10; i++) {
-      float dLeft = boxDistanceAt(rayOrigin + rayDir * (t - s), extents);
+      float tLeft = max(t - s, 0.0);
+      float dLeft = boxDistanceAt(rayOrigin + rayDir * tLeft, extents);
       if (dLeft < d) {
         d = dLeft;
-        t -= s;
+        t = tLeft;
       }
       float dRight = boxDistanceAt(rayOrigin + rayDir * (t + s), extents);
       if (dRight < d) {
@@ -112,36 +119,73 @@ const SURFACE_ZONE_HEIGHT = 0.72;
 export const FOCUS_RAY_FALLBACK_METERS = 8;
 
 /**
- * The focus zone spanned by two dragged corners, in the space the corners are
- * given in. On a surface (desk, floor) the corners mark out its footprint and
- * the zone rises a fixed height above it; otherwise (a wall, a screen) the
- * corners also set its height.
+ * The focus zone spanned by two dragged corners, given in room space. On a
+ * surface (desk, floor) the corners mark out its footprint and the zone rises
+ * a fixed height above it; otherwise (a wall, a screen) the corners also set
+ * its height.
+ *
+ * `yaw` turns the box about the vertical axis, so its sides run along and
+ * across the direction the user faced while dragging instead of along the
+ * room's axes, which point wherever the first session happened to start.
  */
 export function focusZoneFromDrag(
   p1: Vector3Data,
   p2: Vector3Data,
   onSurface: boolean,
+  source: FocusZoneSource,
+  yaw = 0,
   name = 'Focus Area',
 ): FocusZoneBounds {
-  const span = (a: number, b: number): [number, number] => {
-    const size = Math.max(MIN_ZONE_SIZE, Math.abs(a - b));
-    const mid = (a + b) * 0.5;
+  // The corners in the zone's own turned frame.
+  const a = _dragA.set(p1.x, p1.y, p1.z).applyAxisAngle(UP, -yaw);
+  const b = _dragB.set(p2.x, p2.y, p2.z).applyAxisAngle(UP, -yaw);
+  const span = (u: number, v: number): [number, number] => {
+    const size = Math.max(MIN_ZONE_SIZE, Math.abs(u - v));
+    const mid = (u + v) * 0.5;
     return [mid - size * 0.5, mid + size * 0.5];
   };
-  const [minX, maxX] = span(p1.x, p2.x);
-  const [minZ, maxZ] = span(p1.z, p2.z);
-  const baseY = Math.min(p1.y, p2.y);
+  const [minX, maxX] = span(a.x, b.x);
+  const [minZ, maxZ] = span(a.z, b.z);
+  const baseY = Math.min(a.y, b.y);
   const [minY, maxY] = onSurface
     ? [baseY - 0.02, baseY + SURFACE_ZONE_HEIGHT]
-    : span(p1.y, p2.y);
+    : span(a.y, b.y);
   const width = maxX - minX;
   const depth = maxZ - minZ;
   return {
     defined: true,
     label: `${name} (${width.toFixed(2)}m × ${depth.toFixed(2)}m)`,
+    source,
+    yaw,
     min: {x: minX, y: minY, z: minZ},
     max: {x: maxX, y: maxY, z: maxZ},
   };
+}
+
+/**
+ * Top centre of a zone in room space: where its confirm bar sits. Writes
+ * into `out` and returns it.
+ */
+export function focusZoneTopCentre(
+  zone: FocusZoneBounds,
+  out: THREE.Vector3,
+): THREE.Vector3 {
+  return out
+    .set(
+      (zone.min.x + zone.max.x) / 2,
+      zone.max.y,
+      (zone.min.z + zone.max.z) / 2,
+    )
+    .applyAxisAngle(UP, zone.yaw);
+}
+
+/**
+ * The yaw of a zone that faces back along `direction` (the user's aim, in
+ * room space): its local -Z axis points the way the user looks.
+ */
+export function focusZoneYawFacing(direction: THREE.Vector3): number {
+  if (direction.x * direction.x + direction.z * direction.z < 1e-6) return 0;
+  return Math.atan2(-direction.x, -direction.z);
 }
 
 /**
@@ -152,6 +196,8 @@ export function focusZoneFromDrag(
  */
 export class FocusVolume3D {
   public readonly root = new THREE.Group();
+  /** The zone's own frame: room space turned by the zone's yaw. */
+  private readonly zoneFrame = new THREE.Group();
   private wireframeBox: THREE.LineSegments;
   private basePadMesh: THREE.Mesh;
   private dimDome: THREE.Mesh;
@@ -173,6 +219,7 @@ export class FocusVolume3D {
     (this.root as unknown as {xb?: {pointerEvents: string}}).xb = {
       pointerEvents: 'none',
     };
+    this.root.add(this.zoneFrame);
 
     // 1. Unit box, shared by the wireframe border and (scaled) by the frame.
     const boxGeo = this.trackGeo(new THREE.BoxGeometry(1, 1, 1));
@@ -187,7 +234,7 @@ export class FocusVolume3D {
       }),
     );
     this.wireframeBox = new THREE.LineSegments(edgesGeo, lineMat);
-    this.root.add(this.wireframeBox);
+    this.zoneFrame.add(this.wireframeBox);
 
     // 3. Base surface highlight pad
     const padGeo = this.trackGeo(new THREE.PlaneGeometry(1, 1));
@@ -202,7 +249,7 @@ export class FocusVolume3D {
       }),
     );
     this.basePadMesh = new THREE.Mesh(padGeo, padMat);
-    this.root.add(this.basePadMesh);
+    this.zoneFrame.add(this.basePadMesh);
 
     // 4. Peripheral dim shell for immersive AR (see DIM_FRAGMENT_SHADER)
     this.dimMaterial = this.trackMat(
@@ -239,8 +286,8 @@ export class FocusVolume3D {
       1.2,
     );
     this.focusSpotlight.position.set(0, 2.5, -1.4);
-    this.root.add(this.focusSpotlight);
-    this.root.add(this.focusSpotlight.target);
+    this.zoneFrame.add(this.focusSpotlight);
+    this.zoneFrame.add(this.focusSpotlight.target);
 
     this.applyBoundsGeometry(initialBounds, false);
   }
@@ -263,7 +310,8 @@ export class FocusVolume3D {
     p2: Vector3Data,
     surfaceLabel = 'Custom Focus Zone',
   ): FocusZoneBounds {
-    const bounds = focusZoneFromDrag(p1, p2, true, surfaceLabel);
+    // Dragged on a 2D screen: the box only means something to that screen.
+    const bounds = focusZoneFromDrag(p1, p2, true, 'screen', 0, surfaceLabel);
     this.currentBounds = bounds;
     this.applyBoundsGeometry(bounds, true);
     return bounds;
@@ -302,15 +350,20 @@ export class FocusVolume3D {
 
   /** The single place that decides whether the dim shell is drawn. */
   private syncDimVisibility() {
-    this.dimDome.visible = this.xrDimActive && this.currentBounds.defined;
+    // At zero strength the shell would cost a full-screen blended pass on
+    // both eyes and change nothing.
+    this.dimDome.visible =
+      this.xrDimActive &&
+      this.currentBounds.defined &&
+      this.dimMaterial.uniforms.uBaseOpacity.value > 0;
   }
 
   /** Keeps the dim shell centred on the viewer. Call once per frame. */
   public updateDim(cameraWorldPosition: THREE.Vector3) {
     if (!this.dimDome.visible) return;
-    this.root.updateWorldMatrix(true, false);
+    this.zoneFrame.updateWorldMatrix(true, false);
     (this.dimMaterial.uniforms.uZoneFromWorld.value as THREE.Matrix4)
-      .copy(this.root.matrixWorld)
+      .copy(this.zoneFrame.matrixWorld)
       .invert();
     this.dimDome.position.copy(cameraWorldPosition);
     this.root.worldToLocal(this.dimDome.position);
@@ -330,6 +383,7 @@ export class FocusVolume3D {
   }
 
   private applyBoundsGeometry(bounds: FocusZoneBounds, showFrame: boolean) {
+    this.zoneFrame.rotation.set(0, bounds.yaw, 0);
     this.syncDimVisibility();
     if (!bounds.defined) {
       this.wireframeBox.visible = false;
@@ -396,6 +450,8 @@ export class FocusVolume3D {
     }
 
     const {min, max} = this.currentBounds;
+    this.zoneFrame.updateWorldMatrix(true, false);
+    const worldFromZone = this.zoneFrame.matrixWorld;
     const xs = [min.x, max.x];
     const ys = [min.y, max.y];
     const zs = [min.z, max.z];
@@ -409,7 +465,7 @@ export class FocusVolume3D {
     for (const x of xs) {
       for (const y of ys) {
         for (const z of zs) {
-          _corner.set(x, y, z).project(camera);
+          _corner.set(x, y, z).applyMatrix4(worldFromZone).project(camera);
           if (_corner.z <= 1.0) {
             anyInFront = true;
           }
