@@ -29,9 +29,8 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
 
 ## Verification baseline
 
-- `bun run lint` (`tsc --noEmit`) is the only gate; it passed at `c64340b`.
-- There is no test suite. Every plan therefore ends in a typecheck, a build
-  and a listed manual check.
+- `bun run lint` (`tsc --noEmit`) and `bun run test` (Vitest) are the local
+  checks; CI runs both before the build.
 
 ## Fixed directly on 2026-11-12 (uncommitted, typecheck and build pass)
 
@@ -65,14 +64,6 @@ Vetted against the code; ask for a plan for any of them.
   (`src/FocusVolume3D.ts`). Product decision.
 - **A room-anchored focus area on the 2D screen** is projected through the
   2D view's made-up camera.
-- **Structure**: `src/LotusUI.ts` (about 3,800 lines) owns the focus timer,
-  the live task list and settings, and the headset reaches them through the
-  DOM class (`ImmersiveHost.ui`). `src/ImmersiveSession.ts` and
-  `src/XRInterface.ts` are also past 1,000 lines. Recommended first cut: a
-  `FocusTimer` module owned by `src/index.ts` that both interfaces
-  subscribe to. Not attempted: there is no test suite to protect a refactor
-  of that size.
-
 ## Findings considered and rejected
 
 - Ray casts against the depth mesh every frame per controller: not a cost

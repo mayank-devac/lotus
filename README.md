@@ -79,7 +79,8 @@ Then open the printed URL. Desktop browsers open the interactive 3D room; clicki
 ### Other scripts
 
 ```bash
-bun run lint       # typecheck (tsc --noEmit) — the only quality gate; run after every change
+bun run lint       # typecheck (tsc --noEmit)
+bun run test       # run the Vitest suite
 bun run build      # production build → dist/
 bun run preview    # serve the production build locally
 bun run clean      # remove dist/
@@ -102,29 +103,20 @@ assets/
 src/
   index.ts               bootstrap: builds xb.Options() and mounts LotusSpatialApp;
                          DOM drag/pinch interaction state (parallel to the XR path)
-  ImmersiveSession.ts    in-headset session: modes, gestures, ray targeting, panel actions
-  XRInterface.ts         in-headset panels (draw + hit-test only)
-  XRPanel.ts             CanvasPanel building blocks for the in-scene UI
-  XRTextEditor.ts        in-scene keyboard (modal, works in every headset/emulator)
-  xrTextInput.ts         Quest system keyboard bridge (Browser 26.1+)
-  xrSettings.ts          settings rows driving the Settings drawer
-  RoomAnchor.ts          moves worldRoot from one persistent WebXR anchor each frame
-  PinManager3D.ts        3D beacon pins, proximity detector, floating headers
-  FocusVolume3D.ts       drag-to-define focus volume, shield meshes, aperture projection
-  CameraPassthrough.ts   getUserMedia video feed behind the transparent canvas
   CameraGate.ts          onboarding card and the only way into XR
+  CameraPassthrough.ts   getUserMedia video feed behind the transparent canvas
+  FocusTimer.ts          shared focus-session clock
+  FocusVolume3D.ts       focus volume and headset shield
+  PinManager3D.ts        3D beacon pins, proximity detector, floating headers
   StudyRoomBuilder.ts    procedural furnished study room + surface colliders
-  speech.ts              Web Speech dictation (degrades gracefully)
-  device.ts              standalone-headset check
-  icons.ts               SVG path data for in-headset panel icons
-  sound.ts               zero-dependency WebAudio synth
-  storage.ts             localStorage persistence + seed/demo data + migrations
-  tasks.ts               pure task-list helpers (shared by DOM UI and XR)
-  types.ts               data shapes (all JSON-serializable)
-  index.css              theme + layout (obsidian slate / cyan / amber palette)
-  LotusUI.ts             all DOM overlay UI (d3-based): welcome panel, note composer,
-                         XR keyboard, pin inspector, pin directory, tasks + insights
-  vite-env.d.ts          vite/client types (`?raw` SVG imports)
+  storage.ts             localStorage persistence and migrations
+  tasks.ts               shared task-list helpers
+  ui/                    DOM overlay, modals, task views and pin markers
+  xr/                    headset session, panels, controls and text entry
+  FocusTimer.test.ts     timer tests
+  storage.test.ts        storage and migration tests
+  tasks.test.ts          task helper tests
+  xr/RoomPlanes.test.ts  room-plane tests
 ```
 
 ## Tech stack
@@ -140,7 +132,7 @@ src/
 
 - There is **no backend, no env vars, no API keys**. Nothing reads `process.env` / `import.meta.env`.
 - `package.json` is deliberately minimal: `d3`, `lit`, `three`, `xrblocks`. `lit` is required by xrblocks (dropping it breaks `vite build`), and `@pmndrs/uikit` auto-installs as xrblocks' required peer. Other xrblocks peers (`openai`, `@google/genai`, `@mediapipe/*`, spark, three-mesh-bvh, three-pathfinding) are optional peers never bundled in — LOTUS has no AI/vision SDK code. Don't re-add them unless actually using an xrblocks feature that needs one.
-- Number of scripts beyond the `package.json` ones: none. There is **no test suite**; `bun run lint` (typecheck) is the sole quality gate locally. CI (`.github/workflows/deploy.yml`) typechecks and deploys to GitHub Pages on every push to `main`.
+- Run `bun run lint` and `bun run test` to typecheck and run the Vitest suite. CI runs both before building and deploying to GitHub Pages.
 - Product spec and confirmed UX decisions live in `.plan/artifacts/implementation_plan.md` — read it before product-level changes.
 - If you change requested device permissions, update `metadata.json` (`requestFramePermissions`) accordingly.
 - Every interaction code change must handle **both input families**: DOM mouse/touch and XR controller/hand pinch, or the app breaks on headset.
