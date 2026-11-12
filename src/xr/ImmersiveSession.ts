@@ -6,11 +6,13 @@ import {
   focusZoneFromDrag,
   focusZoneYawFacing,
 } from '../FocusVolume3D';
+import type {FocusTimerEvent} from '../FocusTimer';
 import {lotusSound} from '../sound';
 import {AppMode, PinScreenProjection, SpatialHit} from '../types';
 import {ConfirmGuard} from './ConfirmGuard';
 import {ImmersiveHost, PinContent} from './ImmersiveHost';
 import {RoomAnchor} from './RoomAnchor';
+import {RoomPlanes} from './RoomPlanes';
 import {XRDrawerController} from './XRDrawerController';
 import {XRFocusZoneEditor} from './XRFocusZoneEditor';
 import {XRInterface} from './XRInterface';
@@ -90,8 +92,9 @@ const MENU_BUTTON_INDEX = 5;
 /** Frame rate requested when the headset offers it (Quest Browser starts at 72). */
 const PREFERRED_FRAME_RATE = 90;
 /**
- * A focus-area drag that starts with the ray pointing down by more than ~20°
- * marks out a surface (desk, floor); a flatter ray marks out a wall area.
+ * When the ray lands on no plane from room setup, a focus-area drag that
+ * starts with the ray pointing down by more than ~20° marks out a surface
+ * (desk, floor); a flatter ray marks out a wall area.
  */
 const FOCUS_SURFACE_PITCH = -0.34;
 /** A corner further than this (m) from the first one is a stray ray, not a drag. */
@@ -123,6 +126,8 @@ export class ImmersiveSession {
     this.notify('Could not find this room again. Pins and the focus area may be out of place.'),
   );
   private readonly raycaster = new THREE.Raycaster();
+  /** Desks, floors and walls from the headset's room setup, if it has one. */
+  private readonly planes = new RoomPlanes();
   private xrSession: XRSession | null = null;
   private active = false;
   private gesture: XRGesture = IDLE;
@@ -134,16 +139,12 @@ export class ImmersiveSession {
   /** Debounced pin hover (see HOVER_GRACE_MS). */
   private hoveredPinId: string | null = null;
   private hoverLostAt = 0;
-  /** Timer state last frame, to hide / show the panel when focus starts / ends. */
-  private timerWasRunning = false;
   /** Hands whose palm faced up last frame (summons the control panel). */
   private palmUp = new Set<XRHandedness>();
   /** Menu button state last frame, per controller, for edge detection. */
   private menuButtonDown = new Set<XRHandedness>();
   /** Destructive buttons (delete, Exit XR) need a confirming second press. */
   private readonly confirm = new ConfirmGuard();
-  /** Play was pressed with "Start focus: Ask each time": the panel shows the choice. */
-  private askingStart = false;
   /** Text for the next placed pin, when it is being placed for a task. */
   private pendingPinContent: PinContent | null = null;
 
@@ -153,6 +154,7 @@ export class ImmersiveSession {
   private readonly card: XRPinCardController;
   private readonly drawer: XRDrawerController;
   private readonly onNativeSelect = () => this.text.openSystemKeyboard();
+  private readonly unsubscribeTimer: () => void;
 
   constructor(private readonly host: ImmersiveHost) {
     this.zone = new XRFocusZoneEditor(host, this.ui, (mode) => this.setMode(mode));
@@ -168,6 +170,7 @@ export class ImmersiveSession {
         this.pendingPinContent = content;
       },
     );
+    this.unsubscribeTimer = host.timer.subscribe((event) => this.onFocusTimer(event));
   }
 
   public get root(): THREE.Object3D {
@@ -184,9 +187,7 @@ export class ImmersiveSession {
     this.reset();
     this.text.setSession(session);
     this.ui.setActive(true);
-    this.host.focusVolume.setXRPresentation(true);
-    this.timerWasRunning = this.host.ui.getIsTimerRunning();
-    if (this.timerWasRunning) this.ui.setHudHidden(true);
+    if (this.host.timer.running) this.ui.setHudHidden(true);
     if (session) {
       this.roomAnchor.begin(session);
       session.addEventListener('select', this.onNativeSelect);
@@ -202,6 +203,7 @@ export class ImmersiveSession {
     this.xrSession?.removeEventListener('select', this.onNativeSelect);
     this.xrSession = null;
     this.roomAnchor.end();
+    this.planes.clear();
     // Back on a 2D screen the room space is the scene space again.
     const root = this.host.worldRoot;
     root.position.set(0, 0, 0);
@@ -211,10 +213,10 @@ export class ImmersiveSession {
     this.reset();
     this.seenControllers.clear();
     this.ui.setActive(false);
-    this.host.focusVolume.setXRPresentation(false);
   }
 
   public dispose() {
+    this.unsubscribeTimer();
     this.xrSession?.removeEventListener('select', this.onNativeSelect);
     this.text.close();
     this.roomAnchor.end();
@@ -226,7 +228,6 @@ export class ImmersiveSession {
     this.gesture = IDLE;
     this.confirm.clear();
     this.zone.reset();
-    this.askingStart = false;
     this.drawer.reset();
     this.pendingPinContent = null;
     this.hoveredPinId = null;
@@ -284,6 +285,7 @@ export class ImmersiveSession {
   public updateFrame(frame: XRFrame, referenceSpace: XRReferenceSpace) {
     if (!this.active) return;
     this.roomAnchor.update(frame, referenceSpace, this.host.worldRoot);
+    this.planes.update(frame, referenceSpace);
     this.readInputShortcuts(frame, referenceSpace);
   }
 
@@ -338,7 +340,6 @@ export class ImmersiveSession {
     const mode = this.host.getMode();
     camera.getWorldPosition(_camPos);
     focusVolume.updateDim(_camPos);
-    this.syncHudWithTimer();
     this.confirm.expire();
 
     this.panelHits.length = 0;
@@ -410,16 +411,16 @@ export class ImmersiveSession {
 
     this.text.closeIfStale();
     const typing = this.ui.editor.isOpen();
-    if (this.askingStart && (this.ui.isHudHidden() || this.host.ui.getIsTimerRunning())) {
-      this.askingStart = false;
-    }
+    // A hidden panel cannot show the question.
+    if (this.ui.isHudHidden()) this.zone.closeQuestion();
+    const {timer} = this.host;
     this.ui.updateHud(
       {
-        clock: this.host.ui.getTimerClockText(),
-        timerRunning: this.host.ui.getIsTimerRunning(),
+        clock: timer.clockText() || '00:00',
+        timerRunning: timer.running,
         mode,
         hint: this.hint(mode),
-        askingStart: this.askingStart,
+        askingStart: this.zone.isAsking(),
         exitArmed: this.confirm.isArmed('exit-xr'),
       },
       camera,
@@ -449,7 +450,7 @@ export class ImmersiveSession {
 
   /** What the control panel says when nothing more specific is showing. */
   private hint(mode: AppMode): string {
-    if (this.askingStart) return 'Start how? Timer only, or dim around a focus area';
+    if (this.zone.isAsking()) return 'Start how? Timer only, or dim around a focus area';
     if (this.ui.editor.isOpen()) return 'Type on the keyboard, then press Done';
     switch (mode) {
       case 'explore':
@@ -483,17 +484,25 @@ export class ImmersiveSession {
     return this.hoveredPinId;
   }
 
-  /** Focus starting puts the panel away; focus ending brings it back. */
-  private syncHudWithTimer() {
-    const running = this.host.ui.getIsTimerRunning();
-    if (running === this.timerWasRunning) return;
-    this.timerWasRunning = running;
-    if (running) {
-      this.ui.setDrawerTab(null);
-      this.ui.setHudHidden(true);
-    } else {
-      this.ui.setHudHidden(false);
-      this.ui.flashStatus('Focus session ended');
+  /**
+   * Focus starting puts the panel away; focus ending brings it back. The
+   * timer may be started from either interface, so this follows the timer
+   * rather than the buttons.
+   */
+  private onFocusTimer(event: FocusTimerEvent) {
+    if (!this.active) return;
+    switch (event.type) {
+      case 'start':
+        this.zone.closeQuestion();
+        this.ui.setDrawerTab(null);
+        this.ui.setHudHidden(true);
+        return;
+      case 'stop':
+        this.ui.setHudHidden(false);
+        this.ui.flashStatus(event.completed ? 'Focus session complete' : 'Focus session ended');
+        return;
+      case 'tick':
+        return; // The panel reads the clock every frame.
     }
   }
 
@@ -812,37 +821,20 @@ export class ImmersiveSession {
 
   private runHudAction(action: XRHudAction) {
     const mode = this.host.getMode();
-    const timer = this.host.ui;
     // Any other button answers the "Start how?" question with "not now".
     if (action !== 'start-timer-only' && action !== 'start-with-area') {
-      this.askingStart = false;
+      this.zone.closeQuestion();
     }
     // Any other button also withdraws a first press on Exit XR.
     if (action !== 'exit-xr') this.confirm.clear();
     switch (action) {
       case 'toggle-timer':
-        if (timer.getIsTimerRunning()) {
-          timer.stopFocusTimer();
-          return;
-        }
-        switch (timer.getSettings().focusStart) {
-          case 'ask':
-            this.askingStart = true;
-            return;
-          case 'timer':
-            this.zone.startTimerOnly();
-            return;
-          case 'area':
-            this.zone.startWithArea();
-            return;
-        }
+        this.zone.pressPlay();
         return;
       case 'start-timer-only':
-        this.askingStart = false;
         this.zone.startTimerOnly();
         return;
       case 'start-with-area':
-        this.askingStart = false;
         this.zone.startWithArea();
         return;
       case 'start-cancel':
@@ -877,25 +869,46 @@ export class ImmersiveSession {
   // ---------------------------------------------------------------------------
   // Focus area drag (the area itself is XRFocusZoneEditor's)
   // ---------------------------------------------------------------------------
+  /**
+   * Desk or wall? Where the ray lands on a plane from the headset's room
+   * setup, that plane says (and a wall area lies flat on the wall). Without
+   * one, the angle of the ray decides: aiming down marks out a desk or floor.
+   */
   private startFocusDrag(controller: xb.Controller, hit: SpatialHit) {
     const {origin, direction} = this.raycaster.ray;
+    const plane = this.planes.hit(this.raycaster.ray, hit.isSurface ? hit.distance : Infinity);
     const ray = this.roomRay();
-    // Real surface: keep the hit. Otherwise extend the room-space ray: a far
-    // aim must start the corner out along the ray, not at the short pick
-    // fallback, and the cast already proved nothing blocks it.
+    // The first corner: the room surface the ray hit, else the room-setup
+    // plane, else far out along the ray (a far aim must start the corner
+    // there, not at the short pick fallback; the cast showed nothing blocks it).
     const start = new THREE.Vector3();
     if (hit.isSurface) {
       start.set(hit.point.x, hit.point.y, hit.point.z);
+    } else if (plane) {
+      this.host.worldRoot.worldToLocal(start.copy(plane.point));
     } else {
       ray.at(FOCUS_RAY_FALLBACK_METERS, start);
     }
-    const onSurface = ray.direction.y < FOCUS_SURFACE_PITCH;
+
+    const onSurface = plane
+      ? plane.orientation === 'horizontal'
+      : ray.direction.y < FOCUS_SURFACE_PITCH;
+    // The plane the second corner slides across, in room space.
     const normal = new THREE.Vector3(0, 1, 0);
+    let facing = ray.direction;
     if (!onSurface) {
-      // An upright plane facing the user, through the first corner.
-      normal.set(-ray.direction.x, 0, -ray.direction.z);
+      if (plane) {
+        // Flat on the wall, and squared up with it rather than with the aim.
+        // (`roomRay()` above has just set _roomFromWorld.)
+        normal.copy(plane.normal).transformDirection(_roomFromWorld);
+      } else {
+        // An upright plane facing the user, through the first corner.
+        normal.set(-ray.direction.x, 0, -ray.direction.z);
+      }
+      normal.y = 0;
       if (normal.lengthSq() < 1e-6) normal.set(0, 0, 1);
       normal.normalize();
+      facing = new THREE.Vector3().copy(normal).negate();
     }
     this.gesture = {
       kind: 'focus',
@@ -905,7 +918,7 @@ export class ImmersiveSession {
       start,
       plane: new THREE.Plane().setFromNormalAndCoplanarPoint(normal, start),
       onSurface,
-      yaw: focusZoneYawFacing(ray.direction),
+      yaw: focusZoneYawFacing(facing),
       moved: false,
     };
   }
@@ -915,7 +928,7 @@ export class ImmersiveSession {
 function gripOf(hit: XRPanelHit): XRMovablePanel | null {
   if (hit.panel === 'hud' && hit.action === 'move-hud') return 'hud';
   // The drawer rides on the control panel: its grip moves both.
-  if (hit.panel === 'drawer' && hit.action === 'move-drawer') return 'hud';
+  if (hit.panel === 'drawer' && hit.action?.kind === 'move-drawer') return 'hud';
   if (hit.panel === 'card' && hit.action === 'move-card') return 'card';
   if (hit.panel === 'editor' && hit.action === 'move') return 'editor';
   return null;

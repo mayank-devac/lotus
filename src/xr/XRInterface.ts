@@ -88,16 +88,11 @@ function hoveredOn<P extends XRPanelHit['panel']>(
 ): ActionOn<P>[] {
   const actions: ActionOn<P>[] = [];
   for (const hit of hits) {
-    if (isHitOn(hit, panel) && hit.action) actions.push(hit.action);
+    // Safe: a hit on `panel` carries that panel's actions (see XRPanelHit);
+    // TypeScript cannot narrow a union through a generic `P`.
+    if (hit.panel === panel && hit.action) actions.push(hit.action as ActionOn<P>);
   }
   return actions;
-}
-
-function isHitOn<P extends XRPanelHit['panel']>(
-  hit: XRPanelHit,
-  panel: P,
-): hit is Extract<XRPanelHit, {panel: P}> {
-  return hit.panel === panel;
 }
 
 export class XRInterface {

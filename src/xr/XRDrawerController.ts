@@ -12,30 +12,23 @@ import {
 import {PinSortBy} from '../types';
 import {ConfirmGuard} from './ConfirmGuard';
 import {ImmersiveHost, PinContent} from './ImmersiveHost';
-import {XRDrawerAction, XRDrawerData, XRTaskFilter} from './XRInterfaceTypes';
+import {
+  XRDrawerAction,
+  XRDrawerData,
+  XRTaskAction,
+  XRTaskFilter,
+} from './XRInterfaceTypes';
 import {XRInterface} from './XRInterface';
 import {XRPinCardController} from './XRPinCardController';
 import {XRTextEntry} from './XRTextEntry';
 import {XRTextRequest} from './XRTextEditor';
-import {XR_SETTINGS, findXRSetting} from './xrSettings';
+import {XR_SETTINGS, XRSettingId, findXRSetting} from './xrSettings';
 
 type TaskTextField = 'title' | 'dueLabel' | 'note';
 /** The task being created (taskId null) or edited in the drawer. */
 interface TaskFormState extends TaskDraft {
   taskId: string | null;
 }
-
-/** A drawer action without its arguments: what comes before the first ':'. */
-type DrawerActionName = XRDrawerAction extends infer A
-  ? A extends `${infer N}:${string}`
-    ? N
-    : A
-  : never;
-/** The drawer actions `runTaskAction` handles; the others are handled in `runDrawerAction`. */
-type TaskActionName = Exclude<
-  DrawerActionName,
-  'move-drawer' | 'page-prev' | 'page-next' | 'pin' | 'pin-sort' | 'setting'
->;
 
 const TASK_FILTERS: XRTaskFilter[] = ['all', 'ongoing', 'completed'];
 const TASK_TEXT_FIELDS: Record<TaskTextField, Omit<XRTextRequest, 'initial'>> = {
@@ -81,46 +74,39 @@ export class XRDrawerController {
     this.viewer.copy(position);
   }
   public runAction(action: XRDrawerAction) {
-    if (action !== 'task-delete') this.confirm.clear();
-    const [first, id, direction] = action.split(':');
-    // Safe: `action` is an XRDrawerAction, and DrawerActionName is by
-    // definition what those have before their first ':'.
-    const name = first as DrawerActionName;
-    switch (name) {
+    if (action.kind !== 'task-delete') this.confirm.clear();
+    switch (action.kind) {
       case 'move-drawer':
         return; // A drag, handled in selectStart.
-      case 'page-prev':
-        this.ui.turnDrawerPage(-1);
-        return;
-      case 'page-next':
-        this.ui.turnDrawerPage(1);
+      case 'page':
+        this.ui.turnDrawerPage(action.step);
         return;
       case 'pin':
-        this.card.open(id);
+        this.card.open(action.pinId);
         return;
       case 'pin-sort':
         this.pinSort = this.pinSort === 'proximity' ? 'date' : 'proximity';
         return;
       case 'setting':
-        this.changeSetting(id, direction === 'prev' ? -1 : 1);
+        this.changeSetting(action.id, action.step);
         return;
       default:
-        // `name` is narrowed to what is left: a case removed above, or a new
-        // drawer action handled nowhere, fails to compile here or below.
-        this.runTaskAction(name, id);
+        // `action` is narrowed to the tasks tab's buttons; a new drawer
+        // action handled nowhere fails to compile in runTaskAction.
+        this.runTaskAction(action);
     }
   }
 
-  private runTaskAction(name: TaskActionName, taskId: string | undefined) {
+  private runTaskAction(action: XRTaskAction) {
     const tasks = this.host.getTasks();
     const openTask = tasks.find((t) => t.id === this.openTaskId);
-    switch (name) {
+    switch (action.kind) {
       // Task list
       case 'task-toggle':
-        if (taskId) this.toggleTaskDone(taskId);
+        this.toggleTaskDone(action.taskId);
         return;
       case 'task-open':
-        this.openTaskId = taskId ?? null;
+        this.openTaskId = action.taskId;
         return;
       case 'task-new':
         this.taskForm = {
@@ -205,7 +191,7 @@ export class XRDrawerController {
         if (this.taskForm) {
           this.taskForm.timerMinutes = this.nextTimerPreset(
             this.taskForm.timerMinutes,
-            name === 'form-timer-up' ? 1 : -1,
+            action.kind === 'form-timer-up' ? 1 : -1,
           );
         }
         return;
@@ -218,7 +204,7 @@ export class XRDrawerController {
         return;
       default:
         // Does not compile when a drawer action is handled nowhere.
-        name satisfies never;
+        action satisfies never;
     }
   }
 
@@ -273,12 +259,12 @@ export class XRDrawerController {
     lotusSound.playPinCreated();
   }
 
-  private changeSetting(id: string, direction: 1 | -1) {
+  private changeSetting(id: XRSettingId, direction: 1 | -1) {
     const def = findXRSetting(id);
     if (!def) return;
     const ui = this.host.ui;
     const timerSetting = def.id === 'timer-mode' || def.id === 'focus-length';
-    if (timerSetting && ui.getIsTimerRunning()) {
+    if (timerSetting && this.host.timer.running) {
       // Changing the clock under a running timer would make it jump.
       this.ui.flashStatus('Stop the focus timer to change this');
       return;

@@ -265,7 +265,6 @@ export class SetupModal {
       btn.addEventListener('click', () => {
         this.host.settings.timerMode = (btn as HTMLElement).dataset
           .timerMode as TimerMode;
-        this.host.timer.resetClock();
         this.host.callbacks.onSettingsChange(this.host.settings);
         this.host.renderAll();
       });
@@ -276,7 +275,6 @@ export class SetupModal {
         this.host.settings.presetMinutes = Number(
           (btn as HTMLElement).dataset.presetMin,
         );
-        this.host.timer.resetClock();
         this.host.callbacks.onSettingsChange(this.host.settings);
         this.host.renderAll();
       });
@@ -303,7 +301,6 @@ export class SetupModal {
       ) {
         this.host.settings.customSeconds = 30;
       }
-      this.host.timer.resetClock();
       this.host.callbacks.onSettingsChange(this.host.settings);
       this.host.updateTimerReadouts();
     };

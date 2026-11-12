@@ -4,7 +4,12 @@ import * as xb from 'xrblocks';
 
 import {CameraGate} from './CameraGate';
 import {CameraPassthrough} from './CameraPassthrough';
-import {FocusVolume3D, FOCUS_RAY_FALLBACK_METERS} from './FocusVolume3D';
+import {FocusTimer, clockSettingsChanged} from './FocusTimer';
+import {
+  FocusVolume3D,
+  FOCUS_RAY_FALLBACK_METERS,
+  focusZoneFromDrag,
+} from './FocusVolume3D';
 import {LotusUI} from './ui/LotusUI';
 import {ImmersiveSession} from './xr/ImmersiveSession';
 import {PinManager3D} from './PinManager3D';
@@ -55,6 +60,8 @@ class LotusSpatialApp extends xb.Script {
   private roomBuilder!: StudyRoomBuilder;
   private pinManager!: PinManager3D;
   private focusVolume!: FocusVolume3D;
+  /** The one focus session clock; both interfaces start, stop and follow it. */
+  private timer!: FocusTimer;
   private ui!: LotusUI;
   private cameraGate?: CameraGate;
   private webcamWanted = false;
@@ -94,6 +101,16 @@ class LotusSpatialApp extends xb.Script {
     this.focusZone = loadFocusZone();
     this.settings = loadLotusSettings();
     lotusSound.enabled = this.settings.soundEnabled;
+    this.timer = new FocusTimer(() => this.settings);
+    // Whichever interface started or stopped it, the sound and the 3D scene
+    // follow the timer from here.
+    this.timer.subscribe((event) => {
+      if (event.type === 'tick') return;
+      if (event.type === 'start') lotusSound.playFocusStart();
+      else if (event.completed) lotusSound.playTimerComplete();
+      else lotusSound.playFocusStop();
+      this.syncFocusVisuals();
+    });
 
     // 1. Show the onboarding card on every device. A user tap either opens the
     //    webcam (browser prompt) or, on immersive-ar devices, enters XR, where
@@ -129,7 +146,9 @@ class LotusSpatialApp extends xb.Script {
     }
 
     // 6. Initialize Simple, Clutter-Free UI
-    this.ui = new LotusUI(this.pins, this.tasks, this.focusZone, this.settings, {
+    // The UI edits its own copy of the settings and reports each change back
+    // (`onSettingsChange`), so this class can tell what changed.
+    this.ui = new LotusUI(this.pins, this.tasks, this.focusZone, {...this.settings}, this.timer, {
       onModeChange: (newMode) => {
         this.mode = newMode;
         this.pinManager.updatePreview(false);
@@ -178,7 +197,13 @@ class LotusSpatialApp extends xb.Script {
         this.isGlidingCamera = true;
       },
       onSettingsChange: (updatedSettings) => {
+        const before = this.settings;
         this.settings = {...updatedSettings};
+        // A new length or mode applies from the next session; a running
+        // clock would jump.
+        if (!this.timer.running && clockSettingsChanged(before, this.settings)) {
+          this.timer.resetClock();
+        }
         saveLotusSettings(this.settings);
         lotusSound.enabled = this.settings.soundEnabled;
         this.roomBuilder.setVisible(this.settings.showVirtualRoom);
@@ -188,8 +213,6 @@ class LotusSpatialApp extends xb.Script {
       onFocusZoneChange: (updatedZone) => {
         this.focusZone = {...updatedZone};
         saveFocusZoneToStorage(this.focusZone);
-      },
-      onTimerStateChange: () => {
         this.syncFocusVisuals();
       },
       onFlipCamera: () => {
@@ -202,6 +225,7 @@ class LotusSpatialApp extends xb.Script {
       pinManager: this.pinManager,
       focusVolume: this.focusVolume,
       worldRoot: this.worldRoot,
+      timer: this.timer,
       ui: this.ui,
       getMode: () => this.mode,
       setMode: (mode) => this.setMode(mode),
@@ -217,7 +241,6 @@ class LotusSpatialApp extends xb.Script {
       focusZoneNeedsDefining: () => !isRoomFocusZone(this.focusZone),
       previewFocusZone: (zone) => {
         this.focusZone = zone;
-        this.focusVolume.setBounds(zone);
         this.syncFocusVisuals();
       },
       commitFocusZone: () => {
@@ -328,11 +351,13 @@ class LotusSpatialApp extends xb.Script {
       this.ui.closeAllModals();
       this.removePristineSamplePin();
       this.immersive.begin(xrManager.getSession());
+      this.syncFocusVisuals();
     };
     const onSessionEnd = () => {
       renderer.domElement.classList.add('lotus-canvas');
       document.body.classList.remove('lotus-xr-active');
       this.immersive.end();
+      this.syncFocusVisuals();
       // The 2D layer is coming back. Whatever a phantom input opened while
       // the DOM was hidden (session events can leak in emulators) must not
       // greet the user; the same reset runs on session start.
@@ -370,27 +395,21 @@ class LotusSpatialApp extends xb.Script {
     if (kept.length !== this.pins.length) this.commitPins(kept);
   }
 
-  /** One place that decides which focus visuals show for the current state. */
+  /**
+   * Hands the 3D focus visuals everything they depend on. Call it whenever
+   * any of these changes; FocusVolume3D decides what that shows.
+   */
   private syncFocusVisuals() {
-    // A timer-only session leaves the room undimmed.
-    const running = this.ui.getTimerUsesArea();
-    const presenting = this.isXRPresenting();
-    // In a headset a zone that was not marked out in the room (the default,
-    // or one dragged on a 2D screen) is an arbitrary spot, so the frame only
-    // shows once the user has marked out a real one.
-    const showFrame = presenting
-      ? isRoomFocusZone(this.focusZone)
-      : this.settings.showVirtualRoom;
-    this.focusVolume.setFocusTimerState(
-      running && this.settings.showVirtualRoom,
-      this.settings.shieldStyle,
-      this.mode === 'focus-drag' && showFrame,
-    );
-    this.focusVolume.setXRDim(
-      presenting && running && isRoomFocusZone(this.focusZone),
-      getShieldStrength(this.settings),
-      this.settings.shieldStyle,
-    );
+    this.focusVolume.setState({
+      bounds: this.focusZone,
+      presenting: this.isXRPresenting(),
+      editing: this.mode === 'focus-drag',
+      // A timer-only session leaves the room undimmed.
+      timerWithArea: this.timer.dimsArea,
+      virtualRoom: this.settings.showVirtualRoom,
+      style: this.settings.shieldStyle,
+      strength: getShieldStrength(this.settings),
+    });
   }
 
   /**
@@ -625,14 +644,14 @@ class LotusSpatialApp extends xb.Script {
           e.clientX,
           e.clientY,
         );
-        this.focusZone = this.focusVolume.setBoundsFromDrag(
+        // Dragged on a 2D screen: the box only means something to that screen.
+        this.focusZone = focusZoneFromDrag(
           this.dragStart3D,
-          this.raycastSpatialPoint(
-            this.raycaster,
-            FOCUS_RAY_FALLBACK_METERS,
-          ).point,
-          'Focus Area',
+          this.raycastSpatialPoint(this.raycaster, FOCUS_RAY_FALLBACK_METERS).point,
+          true,
+          'screen',
         );
+        this.syncFocusVisuals();
       }
       return;
     }
@@ -926,6 +945,7 @@ class LotusSpatialApp extends xb.Script {
   }
 
   dispose() {
+    this.timer?.dispose();
     this.unbindXRSession?.();
     this.cameraGate?.dispose();
     this.cameraPassthrough?.stopCamera();
@@ -962,8 +982,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // Options object is read-only in this xrblocks build: keep its default.
   }
   // Persistent anchor that keeps saved pins on the real room (see RoomAnchor).
-  if (!options.webxrOptionalFeatures.includes('anchors')) {
-    options.webxrOptionalFeatures.push('anchors');
+  // Desks and walls from the headset's room setup tell a desk focus area
+  // from a wall one (see RoomPlanes). Optional: without it, or without a
+  // room setup, the angle of the ray decides.
+  for (const feature of ['anchors', 'plane-detection']) {
+    if (!options.webxrOptionalFeatures.includes(feature)) {
+      options.webxrOptionalFeatures.push(feature);
+    }
   }
   // LOTUS draws its own aiming rays and cursor in the headset (XRInterface),
   // so the xrblocks reticle stays off and the desktop view stays clean.

@@ -9,7 +9,7 @@ import {
   SpatialPin,
 } from '../types';
 import type {FocusShield} from './FocusShield';
-import type {FocusTimer} from './FocusTimer';
+import type {FocusTimer} from '../FocusTimer';
 import type {PinMarkers} from './PinMarkers';
 
 /** How the 2D UI tells the app (index.ts) what the user did. */
@@ -26,7 +26,6 @@ export interface LotusUICallbacks {
   onWalkToPin: (pin: SpatialPin) => void;
   onSettingsChange: (settings: LotusSettings) => void;
   onFocusZoneChange: (zone: FocusZoneBounds) => void;
-  onTimerStateChange: (isRunning: boolean) => void;
   onFlipCamera: () => void;
 }
 

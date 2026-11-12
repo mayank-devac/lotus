@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import {isRoomFocusZone} from './storage';
 import {
   FocusZoneBounds,
   FocusZoneSource,
@@ -188,11 +189,27 @@ export function focusZoneYawFacing(direction: THREE.Vector3): number {
   return Math.atan2(-direction.x, -direction.z);
 }
 
+/** Everything that decides what the focus visuals show; see `FocusVolume3D.setState`. */
+export interface FocusVisualState {
+  bounds: FocusZoneBounds;
+  /** An immersive session is running: the 3D frame and the dim exist only there. */
+  presenting: boolean;
+  /** Focus-area mode: the zone is being set. */
+  editing: boolean;
+  /** A focus session that dims around the area is running (not a timer-only one). */
+  timerWithArea: boolean;
+  /** The virtual study room is shown; it lights the zone while focusing. */
+  virtualRoom: boolean;
+  style: ShieldStyle;
+  /** How strongly the surroundings are hidden while focusing, 0 (clear) to 1. */
+  strength: number;
+}
+
 /**
- * Manages the 3D drag-to-select Focus Zone bounding volume, its wireframe
- * frame (shown in immersive sessions), the peripheral dim shell that stands in
- * for the 2D blur shield inside a headset, and real-time 3D-to-screen bounding
- * box projection for the 2D optical aperture.
+ * The 3D focus zone: its wireframe frame (shown in immersive sessions), the
+ * peripheral dim shell that stands in for the 2D blur shield inside a
+ * headset, a warm spotlight in the virtual room, and the projection of the
+ * zone onto the screen for the 2D shield.
  */
 export class FocusVolume3D {
   public readonly root = new THREE.Group();
@@ -202,19 +219,23 @@ export class FocusVolume3D {
   private basePadMesh: THREE.Mesh;
   private dimDome: THREE.Mesh;
   private dimMaterial: THREE.ShaderMaterial;
-  private xrPresenting = false;
-  private xrDimActive = false;
   private focusSpotlight: THREE.SpotLight;
 
   private geometries: THREE.BufferGeometry[] = [];
   private materials: THREE.Material[] = [];
 
-  private currentBounds: FocusZoneBounds;
-  private isTimerRunning = false;
-  private shieldStyle: ShieldStyle = 'frosted';
+  private state: FocusVisualState;
 
   constructor(initialBounds: FocusZoneBounds) {
-    this.currentBounds = initialBounds;
+    this.state = {
+      bounds: initialBounds,
+      presenting: false,
+      editing: false,
+      timerWithArea: false,
+      virtualRoom: false,
+      style: 'frosted',
+      strength: 0,
+    };
     this.root.name = 'LotusFocusVolume3D';
     (this.root as unknown as {xb?: {pointerEvents: string}}).xb = {
       pointerEvents: 'none',
@@ -289,7 +310,7 @@ export class FocusVolume3D {
     this.zoneFrame.add(this.focusSpotlight);
     this.zoneFrame.add(this.focusSpotlight.target);
 
-    this.applyBoundsGeometry(initialBounds, false);
+    this.applyState();
   }
 
   private trackGeo<T extends THREE.BufferGeometry>(geo: T): T {
@@ -303,59 +324,68 @@ export class FocusVolume3D {
   }
 
   /**
-   * Updates the 3D focus zone bounds from user drag start & end points.
+   * Shows the focus visuals for `state`. This is the only setter: every rule
+   * about what is visible lives in `applyState`, and the geometry is applied
+   * once per call.
    */
-  public setBoundsFromDrag(
-    p1: Vector3Data,
-    p2: Vector3Data,
-    surfaceLabel = 'Custom Focus Zone',
-  ): FocusZoneBounds {
-    // Dragged on a 2D screen: the box only means something to that screen.
-    const bounds = focusZoneFromDrag(p1, p2, true, 'screen', 0, surfaceLabel);
-    this.currentBounds = bounds;
-    this.applyBoundsGeometry(bounds, true);
-    return bounds;
+  public setState(state: Readonly<FocusVisualState>) {
+    this.state = {...state};
+    this.applyState();
   }
 
-  public setBounds(bounds: FocusZoneBounds, showFrame = false) {
-    this.currentBounds = bounds;
-    this.applyBoundsGeometry(bounds, showFrame);
-  }
-
-  public getBounds(): FocusZoneBounds {
-    return this.currentBounds;
-  }
-
-  /**
-   * In an immersive session the 2D selection outline is not visible, so the
-   * zone is shown with its 3D frame instead.
-   */
-  public setXRPresentation(presenting: boolean) {
-    this.xrPresenting = presenting;
-    if (!presenting) this.setXRDim(false, 0, this.shieldStyle);
-    this.applyBoundsGeometry(this.currentBounds, false);
-  }
-
-  /**
-   * Requests the peripheral dim shell on or off (immersive sessions only). It
-   * shows only while the zone is also defined; see `syncDimVisibility`.
-   */
-  public setXRDim(active: boolean, strength: number, shieldStyle: ShieldStyle) {
-    this.xrDimActive = active;
-    const uniforms = this.dimMaterial.uniforms;
-    uniforms.uBaseOpacity.value = THREE.MathUtils.clamp(strength, 0, 1) * 0.92;
-    (uniforms.uTintColor.value as THREE.Color).setHex(DIM_TINT[shieldStyle]);
-    this.syncDimVisibility();
-  }
-
-  /** The single place that decides whether the dim shell is drawn. */
-  private syncDimVisibility() {
+  private applyState() {
+    const {bounds, presenting, editing, timerWithArea, virtualRoom, style, strength} =
+      this.state;
+    // In a headset only a zone marked out in the room means anything: the
+    // default, or one dragged on a 2D screen, is an arbitrary spot there.
+    const roomZone = isRoomFocusZone(bounds);
+    // On a 2D screen the UI draws its own clean selection outline, so the 3D
+    // frame shows only in a headset: while the zone is being set, and while
+    // focusing in the virtual room.
+    const showFrame = presenting && roomZone && (editing || (timerWithArea && virtualRoom));
+    const opacity = THREE.MathUtils.clamp(strength, 0, 1) * 0.92;
     // At zero strength the shell would cost a full-screen blended pass on
     // both eyes and change nothing.
-    this.dimDome.visible =
-      this.xrDimActive &&
-      this.currentBounds.defined &&
-      this.dimMaterial.uniforms.uBaseOpacity.value > 0;
+    this.dimDome.visible = presenting && timerWithArea && roomZone && opacity > 0;
+    const uniforms = this.dimMaterial.uniforms;
+    uniforms.uBaseOpacity.value = opacity;
+    (uniforms.uTintColor.value as THREE.Color).setHex(DIM_TINT[style]);
+
+    this.zoneFrame.rotation.set(0, bounds.yaw, 0);
+    if (!bounds.defined) {
+      this.wireframeBox.visible = false;
+      this.basePadMesh.visible = false;
+      this.focusSpotlight.intensity = 0;
+      return;
+    }
+
+    const sx = Math.max(0.2, bounds.max.x - bounds.min.x);
+    const sy = Math.max(0.2, bounds.max.y - bounds.min.y);
+    const sz = Math.max(0.2, bounds.max.z - bounds.min.z);
+    const cx = (bounds.min.x + bounds.max.x) * 0.5;
+    const cy = (bounds.min.y + bounds.max.y) * 0.5;
+    const cz = (bounds.min.z + bounds.max.z) * 0.5;
+
+    uniforms.uFocusCenter.value.set(cx, cy, cz);
+    uniforms.uFocusHalfExtents.value.set(sx * 0.5, sy * 0.5, sz * 0.5);
+
+    this.wireframeBox.visible = showFrame;
+    this.basePadMesh.visible = showFrame;
+    if (showFrame) {
+      this.wireframeBox.position.set(cx, cy, cz);
+      this.wireframeBox.scale.set(sx, sy, sz);
+      this.basePadMesh.position.set(cx, bounds.min.y + 0.005, cz);
+      this.basePadMesh.scale.set(sx, 1, sz);
+    }
+
+    // Warm focus spotlight while focusing in the virtual room.
+    if (timerWithArea && virtualRoom) {
+      this.focusSpotlight.position.set(cx, bounds.max.y + 1.15, cz + 0.25);
+      this.focusSpotlight.target.position.set(cx, bounds.min.y, cz);
+      this.focusSpotlight.intensity = 3.5;
+    } else {
+      this.focusSpotlight.intensity = 0;
+    }
   }
 
   /** Keeps the dim shell centred on the viewer. Call once per frame. */
@@ -369,67 +399,6 @@ export class FocusVolume3D {
     this.root.worldToLocal(this.dimDome.position);
   }
 
-  public setFocusTimerState(
-    isRunning: boolean,
-    shieldStyle: ShieldStyle,
-    isDraggingMode: boolean,
-  ) {
-    this.isTimerRunning = isRunning;
-    this.shieldStyle = shieldStyle;
-    this.applyBoundsGeometry(
-      this.currentBounds,
-      isDraggingMode || isRunning,
-    );
-  }
-
-  private applyBoundsGeometry(bounds: FocusZoneBounds, showFrame: boolean) {
-    this.zoneFrame.rotation.set(0, bounds.yaw, 0);
-    this.syncDimVisibility();
-    if (!bounds.defined) {
-      this.wireframeBox.visible = false;
-      this.basePadMesh.visible = false;
-      this.focusSpotlight.intensity = 0;
-      return;
-    }
-
-    const sx = Math.max(0.2, bounds.max.x - bounds.min.x);
-    const sy = Math.max(0.2, bounds.max.y - bounds.min.y);
-    const sz = Math.max(0.2, bounds.max.z - bounds.min.z);
-
-    const cx = (bounds.min.x + bounds.max.x) * 0.5;
-    const cy = (bounds.min.y + bounds.max.y) * 0.5;
-    const cz = (bounds.min.z + bounds.max.z) * 0.5;
-
-    this.dimMaterial.uniforms.uFocusCenter.value.set(cx, cy, cz);
-    this.dimMaterial.uniforms.uFocusHalfExtents.value.set(
-      sx * 0.5,
-      sy * 0.5,
-      sz * 0.5,
-    );
-
-    // On a 2D screen the UI draws its own clean selection outline, so the 3D
-    // frame stays hidden there. In a headset that outline does not exist, so
-    // the wireframe box and base pad show the zone while it is being set.
-    const show3DFrame = this.xrPresenting && showFrame;
-    this.wireframeBox.visible = show3DFrame;
-    this.basePadMesh.visible = show3DFrame;
-    if (show3DFrame) {
-      this.wireframeBox.position.set(cx, cy, cz);
-      this.wireframeBox.scale.set(sx, sy, sz);
-      this.basePadMesh.position.set(cx, bounds.min.y + 0.005, cz);
-      this.basePadMesh.scale.set(sx, 1, sz);
-    }
-
-    // Warm focus spotlight when the timer is active (virtual room only).
-    if (this.isTimerRunning) {
-      this.focusSpotlight.position.set(cx, bounds.max.y + 1.15, cz + 0.25);
-      this.focusSpotlight.target.position.set(cx, bounds.min.y, cz);
-      this.focusSpotlight.intensity = 3.5;
-    } else {
-      this.focusSpotlight.intensity = 0;
-    }
-  }
-
   /**
    * Projects the 8 corners of the 3D Focus Zone bounding box onto the 2D
    * viewport so the optical depth-of-field shield centers on the exact 3D focus volume.
@@ -439,7 +408,7 @@ export class FocusVolume3D {
     viewportWidth: number,
     viewportHeight: number,
   ): ProjectedRect {
-    if (!this.currentBounds.defined) {
+    if (!this.state.bounds.defined) {
       return {
         visible: false,
         x: viewportWidth * 0.2,
@@ -449,7 +418,7 @@ export class FocusVolume3D {
       };
     }
 
-    const {min, max} = this.currentBounds;
+    const {min, max} = this.state.bounds;
     this.zoneFrame.updateWorldMatrix(true, false);
     const worldFromZone = this.zoneFrame.matrixWorld;
     const xs = [min.x, max.x];

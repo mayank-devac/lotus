@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type {FocusTimer} from '../FocusTimer';
 import type {FocusVolume3D} from '../FocusVolume3D';
 import type {PinManager3D} from '../PinManager3D';
 import {AppMode, FocusZoneBounds, LotusTask, SpatialHit, SpatialPin} from '../types';
@@ -12,15 +13,9 @@ export interface ImmersiveHost {
   readonly focusVolume: FocusVolume3D;
   /** Group holding everything stored in room space; moved by the room anchor. */
   readonly worldRoot: THREE.Object3D;
-  readonly ui: Pick<
-    LotusUI,
-    | 'getIsTimerRunning'
-    | 'startFocusTimer'
-    | 'stopFocusTimer'
-    | 'getTimerClockText'
-    | 'getSettings'
-    | 'applySettings'
-  >;
+  /** The app's focus timer, shared with the 2D interface. */
+  readonly timer: FocusTimer;
+  readonly ui: Pick<LotusUI, 'getSettings' | 'applySettings'>;
   getMode(): AppMode;
   setMode(mode: AppMode): void;
   getPins(): SpatialPin[];

@@ -15,7 +15,7 @@ import {
 import {BottomDock} from './BottomDock';
 import {captureModalBodyScroll, escapeHtml, restoreModalBodyScroll} from './dom';
 import {FocusShield} from './FocusShield';
-import {FocusTimer} from './FocusTimer';
+import type {FocusTimer, FocusTimerEvent} from '../FocusTimer';
 import {buildLayout} from './layout';
 import {PinComposerModal} from './PinComposerModal';
 import {PinDirectoryModal} from './PinDirectoryModal';
@@ -82,7 +82,6 @@ export class LotusUI {
   /** A message waiting in the banner; see `showNotice`. */
   private noticeText = '';
 
-  private readonly timer: FocusTimer;
   private readonly dictation = new SharedDictation();
   private readonly markers: PinMarkers;
   private readonly shield: FocusShield;
@@ -108,6 +107,8 @@ export class LotusUI {
     initialTasks: LotusTask[],
     initialFocusZone: FocusZoneBounds,
     initialSettings: LotusSettings,
+    /** The app's focus timer; this UI starts and stops it and follows what it does. */
+    private readonly timer: FocusTimer,
     callbacks: LotusUICallbacks,
   ) {
     this.pins = initialPins;
@@ -116,12 +117,6 @@ export class LotusUI {
     this.customScreenFocusRect = initialFocusZone.customScreenRect ?? null;
     this.settings = initialSettings;
     this.callbacks = callbacks;
-
-    this.timer = new FocusTimer(
-      () => this.settings,
-      () => this.updateTimerReadoutsOnly(),
-      () => this.stopFocusTimer(true),
-    );
 
     this.container = document.createElement('div');
     this.container.id = 'lotus-ui-root';
@@ -150,6 +145,7 @@ export class LotusUI {
     this.directory = new PinDirectoryModal(host, this.modalLayerEl);
     this.tasksModal = new TasksModal(host, this.modalLayerEl);
 
+    this.timer.subscribe((event) => this.onFocusTimer(event));
     this.startTaskTimersEngine();
     this.renderAllPanels();
   }
@@ -595,7 +591,7 @@ export class LotusUI {
       settings: this.settings,
       tasks: this.tasks,
       timerRunning: this.timer.running,
-      timerUsesArea: this.timer.usesArea,
+      timerUsesArea: this.timer.dimsArea,
       vw,
       vh,
       focusCenterX,
@@ -608,7 +604,7 @@ export class LotusUI {
     const isPreviewingFocusArea =
       this.currentMode === 'focus-drag' && !this.isRedraggingFocusArea;
 
-    const shieldOn = this.timer.running && this.timer.usesArea;
+    const shieldOn = this.timer.dimsArea;
     if (!shieldOn && !isPreviewingFocusArea) {
       this.shield.hide();
     } else {
@@ -635,31 +631,37 @@ export class LotusUI {
   // ===========================================================================
   /**
    * `withArea` false runs only the clock: nothing around the focus area is
-   * dimmed. By default the "Start focus" setting decides. A stopwatch session
-   * always starts from zero, while a stopped countdown resumes where it was.
+   * dimmed. By default the "Start focus" setting decides.
    */
   public startFocusTimer(withArea = this.settings.focusStart !== 'timer') {
-    if (!this.timer.start(withArea)) return;
-    this.isWelcomeOpen = false;
-    this.isPinDirectoryOpen = false;
-    this.isTasksOpen = false;
-    this.isComposerOpen = false;
-    this.inspectedPinId = null;
-
-    lotusSound.playFocusStart();
-    this.callbacks.onTimerStateChange(true);
-    this.renderAllPanels();
+    this.timer.start(withArea);
   }
-  /** `completed` is true when a countdown ran out (plays the completion chime only). */
-  public stopFocusTimer(completed = false) {
-    if (!this.timer.stop()) return;
-    if (completed) {
-      lotusSound.playTimerComplete();
-    } else {
-      lotusSound.playFocusStop();
+
+  public stopFocusTimer() {
+    this.timer.stop();
+  }
+
+  /**
+   * The timer may be started or stopped here or in the headset; this view
+   * follows it either way. Sounds and the 3D scene are the app's (index.ts).
+   */
+  private onFocusTimer(event: FocusTimerEvent) {
+    switch (event.type) {
+      case 'tick':
+        this.updateTimerReadoutsOnly();
+        return;
+      case 'start':
+        // A session hides the main interface; no modal stays over it.
+        this.isWelcomeOpen = false;
+        this.isPinDirectoryOpen = false;
+        this.isTasksOpen = false;
+        this.isComposerOpen = false;
+        this.inspectedPinId = null;
+        break;
+      case 'stop':
+        this.shield.hide();
+        break;
     }
-    this.callbacks.onTimerStateChange(false);
-    this.shield.hide();
     this.renderAllPanels();
   }
 
@@ -924,11 +926,6 @@ export class LotusUI {
     this.renderAllPanels();
   }
 
-  /** Current focus timer readout for the in-headset panel. */
-  public getTimerClockText(): string {
-    return this.timer.clockText() || '00:00';
-  }
-
   public isAnyModalOpen(): boolean {
     return (
       this.isTasksOpen ||
@@ -945,28 +942,13 @@ export class LotusUI {
 
   /**
    * Settings changed outside the 2D settings screen (the in-headset drawer).
-   * Goes through the same path as the screen: storage, 3D scene, re-render.
+   * Goes through the same path as the screen: storage, 3D scene, clock,
+   * re-render.
    */
   public applySettings(patch: Partial<LotusSettings>) {
     Object.assign(this.settings, patch);
-    const timerChanged =
-      'timerMode' in patch ||
-      'presetMinutes' in patch ||
-      'customMinutes' in patch ||
-      'customSeconds' in patch;
-    if (timerChanged && !this.timer.running) {
-      this.timer.resetClock();
-    }
     this.callbacks.onSettingsChange(this.settings);
     this.renderAllPanels();
   }
 
-  public getIsTimerRunning(): boolean {
-    return this.timer.running;
-  }
-
-  /** The running timer dims around the focus area (false for a timer-only session). */
-  public getTimerUsesArea(): boolean {
-    return this.timer.running && this.timer.usesArea;
-  }
 }
