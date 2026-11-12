@@ -5,6 +5,7 @@ import {
   createTask,
   dockTaskTimer,
   pinContentFromTask,
+  selectTaskTimerForChip,
   taskClockText,
   toggleTaskDone,
   toggleTaskTimer,
@@ -174,6 +175,41 @@ describe('dockTaskTimer', () => {
     ];
     expect(dockTaskTimer(tasks)).toBeNull();
     expect(dockTaskTimer([])).toBeNull();
+  });
+});
+
+describe('selectTaskTimerForChip', () => {
+  it('prefers the running timer and remembers its task', () => {
+    const running = task({id: 'task-running', timerRunning: true});
+    const paused = task({id: 'task-paused', remainingSeconds: 300});
+    expect(selectTaskTimerForChip([paused, running], paused.id)).toEqual({
+      task: running,
+      selectedTaskId: running.id,
+    });
+  });
+
+  it('keeps a selected timer visible when it is paused at full length', () => {
+    const selected = task();
+    expect(selectTaskTimerForChip([selected], selected.id)).toEqual({
+      task: selected,
+      selectedTaskId: selected.id,
+    });
+  });
+
+  it('drops a missing, completed, or expired selection and falls back to a partial timer', () => {
+    const fallback = task({id: 'task-fallback', remainingSeconds: 300});
+    const invalidSelections = [
+      {tasks: [fallback], selectedTaskId: 'missing'},
+      {tasks: [fallback, task({completed: true})], selectedTaskId: 'task-a'},
+      {tasks: [fallback, task({remainingSeconds: 0})], selectedTaskId: 'task-a'},
+    ];
+
+    for (const selection of invalidSelections) {
+      expect(selectTaskTimerForChip(selection.tasks, selection.selectedTaskId)).toEqual({
+        task: fallback,
+        selectedTaskId: null,
+      });
+    }
   });
 });
 

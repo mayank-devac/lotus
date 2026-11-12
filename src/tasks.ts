@@ -90,6 +90,22 @@ export function dockTaskTimer(tasks: LotusTask[]): LotusTask | null {
   );
 }
 
+/** Picks the task timer for the headset chip, retaining a just-selected full timer after a pause. */
+export function selectTaskTimerForChip(
+  tasks: LotusTask[],
+  selectedTaskId: string | null,
+): {task: LotusTask | null; selectedTaskId: string | null} {
+  const running = tasks.find((task) => !task.completed && task.timerRunning);
+  if (running) return {task: running, selectedTaskId: running.id};
+
+  const selected = tasks.find((task) => task.id === selectedTaskId);
+  if (selected && !selected.completed && taskRemainingSeconds(selected) > 0) {
+    return {task: selected, selectedTaskId};
+  }
+
+  return {task: dockTaskTimer(tasks), selectedTaskId: null};
+}
+
 /**
  * Takes `seconds` off every running task timer. A timer that reaches zero
  * stops. `changed` is false when no timer was running, and `finished` is

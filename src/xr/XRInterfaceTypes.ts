@@ -29,7 +29,15 @@ export type XRHudAction =
   | 'start-timer-only'
   | 'start-with-area'
   | 'start-cancel';
-export type XRChipAction = 'show-hud' | 'timer-pause';
+export type XRChipAction =
+  | 'show-hud'
+  | 'timer-pause'
+  | {kind: 'task-pause'; taskId: string};
+
+/** A chip action as text, for hover and redraw keys. Distinct actions give distinct keys. */
+export function chipActionKey(action: XRChipAction): string {
+  return typeof action === 'string' ? action : `${action.kind}:${action.taskId}`;
+}
 export type XRZoneAction = 'zone-confirm' | 'zone-cancel';
 export type XRDrawerTab = 'tasks' | 'pins' | 'settings';
 /**
@@ -105,8 +113,8 @@ export interface XRHudState {
   timerRunning: boolean;
   /** True while the session clock is held (running, but paused). */
   timerPaused: boolean;
-  /** The running or paused task timer, with its MM:SS clock; null hides its button. */
-  taskTimer: {clock: string; running: boolean} | null;
+  /** The task timer shown in the control panel and chip; null hides its control. */
+  taskTimer: {taskId: string; clock: string; running: boolean} | null;
   mode: AppMode;
   /** What to do next, shown when no button is hovered and nothing was flashed. */
   hint: string;

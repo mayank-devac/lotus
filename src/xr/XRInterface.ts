@@ -24,6 +24,7 @@ import {
   XRPanelHit,
   XRPointerRay,
   XRZoneAction,
+  chipActionKey,
 } from './XRInterfaceTypes';
 import {XRPinCard} from './XRPinCard';
 import {XRPinLabels} from './XRPinLabels';
@@ -95,9 +96,9 @@ function hoveredOn<P extends XRPanelHit['panel']>(
   return actions;
 }
 
-/** Part of a redraw key: the task timer pill's clock and run state, or "none". */
+/** Part of a redraw key: the task timer pill's task, clock and run state, or "none". */
 function taskTimerKey(taskTimer: XRHudState['taskTimer']): string {
-  return taskTimer ? `${taskTimer.clock}|${taskTimer.running}` : 'none';
+  return taskTimer ? `${taskTimer.taskId}|${taskTimer.clock}|${taskTimer.running}` : 'none';
 }
 
 export class XRInterface {
@@ -106,7 +107,7 @@ export class XRInterface {
 
   // Control panel (720 × 360 px at 0.36 × 0.18 m) and its hidden-state chip.
   private hud = new CanvasPanel<XRHudAction>(0.36, 0.18, 720, 360);
-  private chip = new CanvasPanel<XRChipAction>(0.19, 0.06, 380, 120);
+  private chip = new CanvasPanel<XRChipAction>(0.19, 0.06, 380, 120, chipActionKey);
   private hudState: XRHudState = {
     clock: '00:00',
     timerRunning: false,
@@ -342,29 +343,44 @@ export class XRInterface {
     const h = 116;
     if (s.askingStart) {
       if (s.taskTimer) {
-        // The task timer takes over the question as the full-text primary
-        // choice; the two ways to start focus become icons beside it.
+        // The task timer is the main choice, with focus options beside it.
         const {running, clock} = s.taskTimer;
         hud.drawButton(
           'toggle-task-timer',
-          `${running ? 'Pause' : 'Resume'} task${clock ? ` (${clock})` : ''}`,
-          {text: `${running ? 'Pause' : 'Resume'} task${clock ? ` · ${clock}` : ''}`},
-          30, y, 372, h,
-          {active: !running, fontSize: 34},
+          `${running ? 'Pause' : 'Resume'} the task timer${clock ? ` with ${clock} left` : ''}.`,
+          {
+            paint: (c, x, y, w, h) => {
+              const time = clock;
+              c.font = `700 36px ${FONT_MONO}`;
+              c.textAlign = 'left';
+              c.textBaseline = 'middle';
+              const iconSize = 44;
+              const gap = time ? 12 : 0;
+              const timeWidth = c.measureText(time).width;
+              const left = x + (w - iconSize - gap - timeWidth) / 2;
+              drawIcon(c, running ? 'pause' : 'play', left + iconSize / 2, y + h / 2, iconSize, TEXT_MAIN);
+              if (time) {
+                c.fillStyle = TEXT_MAIN;
+                c.fillText(time, left + iconSize + gap, y + h / 2 + 2);
+              }
+            },
+          },
+          30, y, 192, h,
+          {active: !running},
         );
         hud.drawButton(
           'start-timer-only',
           'Just run the timer; the room stays clear',
           {icon: 'timer'},
-          414, y, 84, h,
+          234, y, 144, h,
         );
         hud.drawButton(
           'start-with-area',
           'Dim everything outside your focus area',
           {icon: 'focusArea'},
-          510, y, 84, h,
+          390, y, 144, h,
         );
-        hud.drawButton('start-cancel', 'Do not start', {icon: 'close'}, 606, y, 84, h);
+        hud.drawButton('start-cancel', 'Do not start', {icon: 'close'}, 546, y, 144, h);
         hud.commit();
         return;
       }
@@ -438,37 +454,48 @@ export class XRInterface {
     const {chip, hudState: s} = this;
     const {ctx} = chip;
     chip.clear();
+    const taskTimer = s.timerRunning ? null : s.taskTimer;
+    const timerText = taskTimer?.clock ?? s.clock;
+    const hasTimer = s.timerRunning || taskTimer !== null;
     chip.drawButton(
       'show-hud',
-      'Show panel',
+      'Show the control panel.',
       {
         paint: (c, x, y, _w, h) => {
           drawIcon(c, 'eye', x + 58, y + h / 2, 48, TEXT_MAIN);
-          c.fillStyle = s.timerRunning ? TEXT_MAIN : TEXT_DIM;
-          c.font = s.timerRunning ? `700 44px ${FONT_MONO}` : `600 34px ${FONT_BODY}`;
+          c.fillStyle = hasTimer ? TEXT_MAIN : TEXT_DIM;
+          c.font = hasTimer ? `700 44px ${FONT_MONO}` : `600 34px ${FONT_BODY}`;
           c.textBaseline = 'middle';
-          c.fillText(s.timerRunning ? s.clock : 'LOTUS', x + 104, y + h / 2 + 2);
+          c.fillText(hasTimer ? timerText : 'LOTUS', x + 104, y + h / 2 + 2);
         },
       },
       4, 4, 258, 112,
     );
-    // While a session runs, its clock can be held and continued right here,
-    // whichever mode it counts in; the panel stays hidden.
+
     if (s.timerRunning) {
+      // Keep the focus timer control in its original place.
       chip.drawButton(
         'timer-pause',
-        s.timerPaused ? 'Resume the session clock' : 'Pause the session clock',
+        s.timerPaused ? 'Resume the focus timer.' : 'Pause the focus timer.',
         {icon: s.timerPaused ? 'play' : 'pause'},
         266, 4, 110, 112,
-        {active: !s.timerPaused},
+        {active: s.timerPaused},
+      );
+    } else if (s.taskTimer) {
+      const {taskId, running} = s.taskTimer;
+      chip.drawButton(
+        {kind: 'task-pause', taskId},
+        running ? 'Pause the task timer.' : 'Resume the task timer.',
+        {icon: running ? 'pause' : 'play'},
+        266, 4, 110, 112,
+        {active: !running},
       );
     }
-    // Solid backdrop behind the translucent button colour, sized to the row:
-    // with a session running the pause button joins the chip (372px wide),
-    // without one only the eye button is there (258px).
+    // Keep the chip body transparent so the room remains visible behind just the
+    // individual buttons; the buttons themselves still retain their visual weight.
     ctx.globalCompositeOperation = 'destination-over';
-    roundRectPath(ctx, 4, 4, s.timerRunning ? 372 : 258, 112, 22);
-    ctx.fillStyle = PANEL_BG;
+    roundRectPath(ctx, 4, 4, hasTimer ? 372 : 258, 112, 22);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0)';
     ctx.fill();
     ctx.globalCompositeOperation = 'source-over';
     chip.commit();

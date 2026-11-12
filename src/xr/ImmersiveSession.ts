@@ -8,8 +8,13 @@ import {
 } from '../FocusVolume3D';
 import type {FocusTimerEvent} from '../FocusTimer';
 import {lotusSound} from '../sound';
-import {dockTaskTimer, taskClockText, toggleTaskTimer} from '../tasks';
-import {AppMode, PinScreenProjection, SpatialHit} from '../types';
+import {
+  dockTaskTimer,
+  selectTaskTimerForChip,
+  taskClockText,
+  toggleTaskTimer,
+} from '../tasks';
+import {AppMode, LotusTask, PinScreenProjection, SpatialHit} from '../types';
 import {ConfirmGuard} from './ConfirmGuard';
 import {ImmersiveHost, PinContent} from './ImmersiveHost';
 import {RoomAnchor} from './RoomAnchor';
@@ -52,7 +57,7 @@ type XRGesture =
       plane: THREE.Plane;
       /** True for an area on a desk or floor, false for one on a wall. */
       onSurface: boolean;
-      /** The area faces the user: its sides run along and across their view. */
+      /** Room-axis aligned unless a detected wall provides its own orientation. */
       yaw: number;
       moved: boolean;
     }
@@ -154,6 +159,8 @@ export class ImmersiveSession {
    * Cleared and refilled each frame; the map itself is never reallocated.
    */
   private readonly runningTaskClocks = new Map<string, string>();
+  /** Keeps a just-started task timer on the chip even if it is paused at full length. */
+  private taskTimerChipId: string | null = null;
 
   // The parts of the session with their own state; see each class.
   private readonly text = new XRTextEntry(this.ui);
@@ -237,6 +244,7 @@ export class ImmersiveSession {
     this.zone.reset();
     this.drawer.reset();
     this.pendingPinContent = null;
+    this.taskTimerChipId = null;
     this.hoveredPinId = null;
     this.hoverLostAt = 0;
     this.palmUp.clear();
@@ -421,7 +429,7 @@ export class ImmersiveSession {
     // A hidden panel cannot show the question.
     if (this.ui.isHudHidden()) this.zone.closeQuestion();
     const {timer} = this.host;
-    const taskTimerTask = dockTaskTimer(this.host.getTasks());
+    const taskTimerTask = this.taskTimerForChip();
     this.refreshRunningTaskClocks();
     this.ui.updateHud(
       {
@@ -430,12 +438,13 @@ export class ImmersiveSession {
         timerPaused: timer.paused,
         taskTimer: taskTimerTask
           ? {
+              taskId: taskTimerTask.id,
               clock: taskClockText(taskTimerTask),
               running: Boolean(taskTimerTask.timerRunning),
             }
           : null,
         mode,
-        hint: this.hint(mode),
+        hint: this.hint(mode, taskTimerTask),
         askingStart: this.zone.isAsking(),
         exitArmed: this.confirm.isArmed('exit-xr'),
       },
@@ -477,24 +486,37 @@ export class ImmersiveSession {
   }
 
   /** What the control panel says when nothing more specific is showing. */
-  private hint(mode: AppMode): string {
+  private hint(mode: AppMode, taskTimer: LotusTask | null): string {
     if (this.zone.isAsking()) {
-      const task = dockTaskTimer(this.host.getTasks());
-      return task
-        ? 'Start how? The task timer, timer only, or focus area'
-        : 'Start how? Timer only, or dim around a focus area';
+      return taskTimer
+        ? 'Choose the task timer, a timer only, or a focus area.'
+        : 'Choose a timer, or use a focus area.';
     }
-    if (this.ui.editor.isOpen()) return 'Type on the keyboard, then press Done';
+    if (this.ui.editor.isOpen()) return 'Type your text, then choose Done.';
+    if (taskTimer) {
+      return taskTimer.timerRunning
+        ? 'Your task timer is running.'
+        : 'Your task timer is paused.';
+    }
     switch (mode) {
       case 'explore':
-        return 'Pinch a pin to open it, drag to move it';
+        return 'Pinch a pin to open it, or drag it to move it.';
       case 'pin-add':
         return this.pendingPinContent
-          ? "Pinch where the task's pin should go"
-          : 'Pinch where the pin should go';
+          ? 'Pinch where you want the task pin.'
+          : 'Pinch where you want the pin.';
       case 'focus-drag':
         return this.zone.hint();
     }
+  }
+
+  private taskTimerForChip(): LotusTask | null {
+    const selection = selectTaskTimerForChip(
+      this.host.getTasks(),
+      this.taskTimerChipId,
+    );
+    this.taskTimerChipId = selection.selectedTaskId;
+    return selection.task;
   }
 
   /**
@@ -852,17 +874,28 @@ export class ImmersiveSession {
       case 'hud':
         this.runHudAction(hit.action);
         break;
-      case 'chip':
-        if (hit.action === 'timer-pause') {
+      case 'chip': {
+        const action = hit.action;
+        if (action === 'timer-pause') {
           // One button for the session clock, whichever mode it counts in:
           // hold it here, continue it here. Ending stays on the panel.
           const {timer} = this.host;
           if (timer.paused) timer.resume();
           else timer.pause();
+        } else if (typeof action === 'object' && action.kind === 'task-pause') {
+          const tasks = this.host.getTasks();
+          const task = tasks.find((item) => item.id === action.taskId);
+          if (!task || task.completed) return;
+          this.taskTimerChipId = task.id;
+          this.host.commitTasks(toggleTaskTimer(tasks, task.id));
+          this.ui.flashStatus(
+            task.timerRunning ? 'Your task timer is paused.' : 'Your task timer is running.',
+          );
         } else {
           this.ui.setHudHidden(false, true);
         }
         break;
+      }
       case 'drawer':
         this.drawer.runAction(hit.action);
         break;
@@ -891,14 +924,17 @@ export class ImmersiveSession {
         this.zone.pressPlay();
         return;
       case 'toggle-task-timer': {
-        // Same pause / resume the drawer's open task offers, for whichever
-        // task timer the control panel's button shows.
-        const task = dockTaskTimer(this.host.getTasks());
+        // Resume into the compact chip so the running task timer stays visible.
+        const task = this.taskTimerForChip();
         if (!task) return;
+        this.taskTimerChipId = task.id;
         this.host.commitTasks(toggleTaskTimer(this.host.getTasks(), task.id));
-        this.ui.flashStatus(
-          task.timerRunning ? 'Task timer paused' : 'Task timer resumed',
-        );
+        if (task.timerRunning) {
+          this.ui.flashStatus('Your task timer is paused.');
+        } else {
+          this.ui.flashStatus('Your task timer is running.');
+          this.ui.setHudHidden(true);
+        }
         return;
       }
       case 'start-timer-only':
@@ -992,7 +1028,7 @@ export class ImmersiveSession {
       start,
       plane: new THREE.Plane().setFromNormalAndCoplanarPoint(normal, start),
       onSurface,
-      yaw: focusZoneYawFacing(facing),
+      yaw: !onSurface && plane ? focusZoneYawFacing(facing) : 0,
       moved: false,
     };
   }
