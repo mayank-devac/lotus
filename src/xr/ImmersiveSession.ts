@@ -2,95 +2,28 @@ import * as THREE from 'three';
 import * as xb from 'xrblocks';
 
 import {
-  FocusVolume3D,
-  focusZoneFromDrag,
-  focusZoneTopCentre,
-  focusZoneYawFacing,
   FOCUS_RAY_FALLBACK_METERS,
-} from './FocusVolume3D';
-import {LotusUI, PIN_COLOR_OPTIONS} from './LotusUI';
-import {PinManager3D} from './PinManager3D';
+  focusZoneFromDrag,
+  focusZoneYawFacing,
+} from '../FocusVolume3D';
+import {lotusSound} from '../sound';
+import {AppMode, PinScreenProjection, SpatialHit} from '../types';
+import {ConfirmGuard} from './ConfirmGuard';
+import {ImmersiveHost, PinContent} from './ImmersiveHost';
 import {RoomAnchor} from './RoomAnchor';
+import {XRDrawerController} from './XRDrawerController';
+import {XRFocusZoneEditor} from './XRFocusZoneEditor';
+import {XRInterface} from './XRInterface';
 import {
-  XRCardAction,
-  XRDrawerAction,
-  XRDrawerData,
   XRHudAction,
-  XRInterface,
   XRMovablePanel,
   XRPanelHit,
   XRPointerRay,
-  XRTaskFilter,
-  XRZoneAction,
-} from './XRInterface';
-import {XRKeyAction, XRTextRequest} from './XRTextEditor';
-import {lotusSound} from './sound';
-import {dictateOnce, isSpeechSupported} from './speech';
-import {
-  TASK_TIMER_PRESETS_MIN,
-  TaskDraft,
-  createTask,
-  pinContentFromTask,
-  taskClockText,
-  toggleTaskDone,
-  toggleTaskTimer,
-} from './tasks';
-import {
-  AppMode,
-  FocusZoneBounds,
-  LotusTask,
-  PinScreenProjection,
-  PinSortBy,
-  SpatialHit,
-  SpatialPin,
-} from './types';
-import {XR_SETTINGS, findXRSetting} from './xrSettings';
-import {editWithSystemKeyboard, isSystemKeyboardSupported} from './xrTextInput';
+} from './XRInterfaceTypes';
+import {XRPinCardController} from './XRPinCardController';
+import {XRTextEntry} from './XRTextEntry';
 
-type PinContent = Pick<SpatialPin, 'title' | 'body' | 'surfaceLabel'>;
-type PinTextField = keyof PinContent;
-type TaskTextField = 'title' | 'dueLabel' | 'note';
-
-/** What the immersive session needs from the app that owns the data. */
-export interface ImmersiveHost {
-  readonly pinManager: PinManager3D;
-  readonly focusVolume: FocusVolume3D;
-  /** Group holding everything stored in room space; moved by the room anchor. */
-  readonly worldRoot: THREE.Object3D;
-  readonly ui: Pick<
-    LotusUI,
-    | 'getIsTimerRunning'
-    | 'startFocusTimer'
-    | 'stopFocusTimer'
-    | 'getTimerClockText'
-    | 'getSettings'
-    | 'applySettings'
-  >;
-  getMode(): AppMode;
-  setMode(mode: AppMode): void;
-  getPins(): SpatialPin[];
-  /** Replaces the pin list everywhere (storage, 3D pins, DOM UI). */
-  commitPins(pins: SpatialPin[]): void;
-  /** The live task list, including timers that are counting down. */
-  getTasks(): LotusTask[];
-  /** Replaces the task list everywhere (storage, DOM UI). */
-  commitTasks(tasks: LotusTask[]): void;
-  /** Creates and commits a pin at a ray hit; `content` replaces the default text. */
-  createPinAt(hit: SpatialHit, content?: PinContent): SpatialPin;
-  /** Casts `raycaster` into the room; a miss lands `fallbackDistance` along the ray. */
-  raycastSpatialPoint(
-    raycaster: THREE.Raycaster,
-    fallbackDistance?: number,
-  ): SpatialHit;
-  getFocusZone(): FocusZoneBounds;
-  /** True while the focus zone is still the made-up default. */
-  focusZoneNeedsDefining(): boolean;
-  /** Shows `zone` as the focus zone without saving it. */
-  previewFocusZone(zone: FocusZoneBounds): void;
-  /** Saves the focus zone that is currently shown. */
-  commitFocusZone(): void;
-}
-
+export type {ImmersiveHost} from './ImmersiveHost';
 /** The one pinch gesture in progress, if any. */
 type XRGesture =
   | {kind: 'idle'}
@@ -140,23 +73,6 @@ type XRTarget =
   /** The keyboard is open and the ray is not on a panel: pins and the room ignore it. */
   | {kind: 'blocked'};
 
-/** The task being created (taskId null) or edited in the drawer. */
-interface TaskFormState extends TaskDraft {
-  taskId: string | null;
-}
-
-/** A drawer action without its arguments: what comes before the first ':'. */
-type DrawerActionName = XRDrawerAction extends infer A
-  ? A extends `${infer N}:${string}`
-    ? N
-    : A
-  : never;
-/** The drawer actions `runTaskAction` handles; the others are handled in `runDrawerAction`. */
-type TaskActionName = Exclude<
-  DrawerActionName,
-  'move-drawer' | 'page-prev' | 'page-next' | 'pin' | 'pin-sort' | 'setting'
->;
-
 const IDLE: XRGesture = {kind: 'idle'};
 /** A press becomes a drag once the ray travels this far or turns ~3°. */
 const DRAG_START_METERS = 0.025;
@@ -173,8 +89,6 @@ const PALM_UP_THRESHOLD = 0.75;
 const MENU_BUTTON_INDEX = 5;
 /** Frame rate requested when the headset offers it (Quest Browser starts at 72). */
 const PREFERRED_FRAME_RATE = 90;
-/** A destructive button must be pressed again within this long to act. */
-const CONFIRM_WINDOW_MS = 4000;
 /**
  * A focus-area drag that starts with the ray pointing down by more than ~20°
  * marks out a surface (desk, floor); a flatter ray marks out a wall area.
@@ -184,18 +98,6 @@ const FOCUS_SURFACE_PITCH = -0.34;
 const FOCUS_MAX_SPAN = 15;
 /** Length of a ray that points at nothing. */
 const IDLE_RAY_LENGTH = 1.2;
-
-const TASK_FILTERS: XRTaskFilter[] = ['all', 'ongoing', 'completed'];
-const PIN_TEXT_FIELDS: Record<PinTextField, Omit<XRTextRequest, 'initial'>> = {
-  title: {label: 'Pin title', maxLength: 80},
-  body: {label: 'Pin note', maxLength: 400},
-  surfaceLabel: {label: 'Where is this pin?', maxLength: 40},
-};
-const TASK_TEXT_FIELDS: Record<TaskTextField, Omit<XRTextRequest, 'initial'>> = {
-  title: {label: 'Task title', maxLength: 120},
-  dueLabel: {label: 'Due (optional), e.g. Today 5 PM', maxLength: 40},
-  note: {label: 'Task note (optional)', maxLength: 200},
-};
 
 const _rayQuat = new THREE.Quaternion();
 const _rayOrigin = new THREE.Vector3();
@@ -238,42 +140,35 @@ export class ImmersiveSession {
   private palmUp = new Set<XRHandedness>();
   /** Menu button state last frame, per controller, for edge detection. */
   private menuButtonDown = new Set<XRHandedness>();
-  /** The destructive button waiting for its confirming second press. */
-  private armed: {key: string; until: number} | null = null;
-
-  // Focus area being set: nothing is saved until the user confirms.
-  private zoneBeforeEdit: FocusZoneBounds | null = null;
-  private zoneDrawn = false;
-  private startTimerAfterZone = false;
+  /** Destructive buttons (delete, Exit XR) need a confirming second press. */
+  private readonly confirm = new ConfirmGuard();
   /** Play was pressed with "Start focus: Ask each time": the panel shows the choice. */
   private askingStart = false;
-
-  // Tasks and pins drawer.
-  private taskFilter: XRTaskFilter = 'all';
-  private openTaskId: string | null = null;
-  private taskForm: TaskFormState | null = null;
-  private pinSort: PinSortBy = 'proximity';
   /** Text for the next placed pin, when it is being placed for a task. */
   private pendingPinContent: PinContent | null = null;
-  /** Handed to the drawer every frame; one function, so that allocates nothing. */
-  private readonly getDrawerData = () => this.drawerData();
 
-  // Text entry. `textEdit` is the edit the keyboard is open for: `apply`
-  // saves the typed text, `alive` is false once what it edits has gone (card
-  // closed, task form cancelled), which closes the keyboard.
-  private textEdit: {apply: (text: string) => void; alive: () => boolean} | null = null;
-  private systemKeyboard = false;
-  private stopDictation: (() => void) | null = null;
-  private stopSystemKeyboard: (() => void) | null = null;
-  /**
-   * The headset-keyboard key was pressed. That keyboard opens on the
-   * browser's own `select` event (pinch release): xrblocks reports pinches
-   * from its frame loop, outside the user gesture `focus()` needs.
-   */
-  private pendingSystemKeyboard = false;
-  private readonly onNativeSelect = () => this.openSystemKeyboard();
+  // The parts of the session with their own state; see each class.
+  private readonly text = new XRTextEntry(this.ui);
+  private readonly zone: XRFocusZoneEditor;
+  private readonly card: XRPinCardController;
+  private readonly drawer: XRDrawerController;
+  private readonly onNativeSelect = () => this.text.openSystemKeyboard();
 
-  constructor(private readonly host: ImmersiveHost) {}
+  constructor(private readonly host: ImmersiveHost) {
+    this.zone = new XRFocusZoneEditor(host, this.ui, (mode) => this.setMode(mode));
+    this.card = new XRPinCardController(host, this.ui, this.text, this.confirm);
+    this.drawer = new XRDrawerController(
+      host,
+      this.ui,
+      this.text,
+      this.confirm,
+      this.card,
+      (content) => {
+        this.setMode('pin-add');
+        this.pendingPinContent = content;
+      },
+    );
+  }
 
   public get root(): THREE.Object3D {
     return this.ui.root;
@@ -287,7 +182,7 @@ export class ImmersiveSession {
     this.active = true;
     this.xrSession = session;
     this.reset();
-    this.systemKeyboard = isSystemKeyboardSupported(session);
+    this.text.setSession(session);
     this.ui.setActive(true);
     this.host.focusVolume.setXRPresentation(true);
     this.timerWasRunning = this.host.ui.getIsTimerRunning();
@@ -321,21 +216,18 @@ export class ImmersiveSession {
 
   public dispose() {
     this.xrSession?.removeEventListener('select', this.onNativeSelect);
-    this.closeEditor();
+    this.text.close();
     this.roomAnchor.end();
     this.ui.dispose();
   }
 
   private reset() {
-    this.closeEditor();
+    this.text.close();
     this.gesture = IDLE;
-    this.armed = null;
-    this.zoneBeforeEdit = null;
-    this.zoneDrawn = false;
-    this.startTimerAfterZone = false;
+    this.confirm.clear();
+    this.zone.reset();
     this.askingStart = false;
-    this.openTaskId = null;
-    this.taskForm = null;
+    this.drawer.reset();
     this.pendingPinContent = null;
     this.hoveredPinId = null;
     this.hoverLostAt = 0;
@@ -375,12 +267,9 @@ export class ImmersiveSession {
   private setMode(mode: AppMode) {
     const from = this.host.getMode();
     if (from === mode) return;
-    if (from === 'focus-drag') this.discardZoneEdit();
+    if (from === 'focus-drag') this.zone.discard();
     if (from === 'pin-add') this.pendingPinContent = null;
-    if (mode === 'focus-drag') {
-      this.zoneBeforeEdit = this.host.getFocusZone();
-      this.zoneDrawn = false;
-    }
+    if (mode === 'focus-drag') this.zone.beginEdit();
     this.host.setMode(mode);
   }
 
@@ -450,7 +339,7 @@ export class ImmersiveSession {
     camera.getWorldPosition(_camPos);
     focusVolume.updateDim(_camPos);
     this.syncHudWithTimer();
-    if (this.armed && performance.now() >= this.armed.until) this.armed = null;
+    this.confirm.expire();
 
     this.panelHits.length = 0;
     let rayPinId: string | null = null;
@@ -519,7 +408,7 @@ export class ImmersiveSession {
     }
     this.ui.updatePointers(this.rays, controllers.length);
 
-    if (this.textEdit && !this.textEdit.alive()) this.closeEditor();
+    this.text.closeIfStale();
     const typing = this.ui.editor.isOpen();
     if (this.askingStart && (this.ui.isHudHidden() || this.host.ui.getIsTimerRunning())) {
       this.askingStart = false;
@@ -531,21 +420,22 @@ export class ImmersiveSession {
         mode,
         hint: this.hint(mode),
         askingStart: this.askingStart,
-        exitArmed: this.armed?.key === 'exit-xr',
+        exitArmed: this.confirm.isArmed('exit-xr'),
       },
       camera,
     );
-    this.ui.updateDrawer(this.getDrawerData);
-    this.ui.updateZoneBar(camera, this.zoneBarAnchor(mode));
+    this.drawer.setViewerPosition(_camPos);
+    this.ui.updateDrawer(this.drawer.getData);
+    this.ui.updateZoneBar(camera, this.zone.barAnchor(mode));
     this.ui.editor.update(camera);
 
     const cardPinId = this.ui.getCardPinId();
     if (cardPinId) {
       if (pinManager.getPinWorldPosition(cardPinId, _pinPos)) {
-        this.ui.setCardDeleteArmed(this.armed?.key === `pin:${cardPinId}`);
+        this.ui.setCardDeleteArmed(this.confirm.isArmed(`pin:${cardPinId}`));
         this.ui.updateCard(camera, _pinPos, delta, typing);
       } else {
-        this.closeCard();
+        this.card.close();
       }
     }
     this.ui.updateLabels(
@@ -569,11 +459,7 @@ export class ImmersiveSession {
           ? "Pinch where the task's pin should go"
           : 'Pinch where the pin should go';
       case 'focus-drag':
-        if (this.zoneDrawn) return 'Drag again to redo, or press "Use this area"';
-        if (this.canConfirmZone()) return 'Pinch and drag to mark a new focus area';
-        return this.startTimerAfterZone
-          ? 'First pinch and drag across your desk'
-          : 'Pinch and drag across your desk';
+        return this.zone.hint();
     }
   }
 
@@ -729,10 +615,9 @@ export class ImmersiveSession {
       if (span > FOCUS_MAX_SPAN) {
         corner.sub(g.start).multiplyScalar(FOCUS_MAX_SPAN / span).add(g.start);
       }
-      this.host.previewFocusZone(
+      this.zone.preview(
         focusZoneFromDrag(g.start, corner, g.onSurface, 'room', g.yaw),
       );
-      this.zoneDrawn = true;
       return;
     }
 
@@ -749,7 +634,7 @@ export class ImmersiveSession {
   public selectEnd(controller: xb.Controller) {
     // Normally the native `select` already opened it; a pinch shorter than a
     // frame can release before the press was seen, so try once more here.
-    this.openSystemKeyboard();
+    this.text.openSystemKeyboard();
     const g = this.gesture;
     if (!this.active || g.kind === 'idle' || g.controller !== controller) {
       return;
@@ -764,7 +649,7 @@ export class ImmersiveSession {
         const {pinManager} = this.host;
         pinManager.setDraggingPin(null);
         if (!g.moved) {
-          this.openCard(g.pinId);
+          this.card.open(g.pinId);
           return;
         }
         // The drag moved the pin object in place; persist the list as it is.
@@ -790,13 +675,13 @@ export class ImmersiveSession {
         const content = this.pendingPinContent;
         const pin = this.host.createPinAt(hit, content ?? undefined);
         this.setMode('explore');
-        this.openCard(pin.id);
+        this.card.open(pin.id);
         this.pulse(controller, 0.4, 30);
         if (content) {
           this.ui.flashStatus('Pin placed for the task');
         } else {
           // Like the 2D composer: a new pin asks for its name straight away.
-          this.editPinText(pin.id, 'title', {
+          this.card.editText(pin.id, 'title', {
             label: 'Name this pin',
             initial: '',
             placeholder: pin.title,
@@ -808,7 +693,7 @@ export class ImmersiveSession {
         this.startFocusDrag(controller, hit);
         return;
       case 'explore':
-        if (this.ui.getCardPinId()) this.closeCard();
+        if (this.ui.getCardPinId()) this.card.close();
         return;
     }
   }
@@ -899,7 +784,7 @@ export class ImmersiveSession {
       // Keys do not change the drawer; text that is applied invalidates it
       // where it is applied.
       lotusSound.playKeyTap();
-      this.runEditorAction(hit.action);
+      this.text.runAction(hit.action);
       return;
     }
     lotusSound.playHoverTick();
@@ -911,32 +796,18 @@ export class ImmersiveSession {
         this.ui.setHudHidden(false, true);
         break;
       case 'drawer':
-        this.runDrawerAction(hit.action);
+        this.drawer.runAction(hit.action);
         break;
       case 'card':
-        this.runCardAction(hit.action);
+        this.card.runAction(hit.action);
         break;
       case 'zone':
-        this.runZoneAction(hit.action);
+        this.zone.runAction(hit.action);
         break;
     }
     // The drawer only looks at its data a few times a second; a press must
     // show at once.
     this.ui.invalidateDrawer();
-  }
-
-  /**
-   * Destructive buttons need two presses. The first arms the button for a few
-   * seconds and returns false; the second, while armed, returns true.
-   */
-  private confirmTwice(key: string): boolean {
-    const now = performance.now();
-    if (this.armed?.key === key && now < this.armed.until) {
-      this.armed = null;
-      return true;
-    }
-    this.armed = {key, until: now + CONFIRM_WINDOW_MS};
-    return false;
   }
 
   private runHudAction(action: XRHudAction) {
@@ -947,7 +818,7 @@ export class ImmersiveSession {
       this.askingStart = false;
     }
     // Any other button also withdraws a first press on Exit XR.
-    if (action !== 'exit-xr') this.armed = null;
+    if (action !== 'exit-xr') this.confirm.clear();
     switch (action) {
       case 'toggle-timer':
         if (timer.getIsTimerRunning()) {
@@ -959,20 +830,20 @@ export class ImmersiveSession {
             this.askingStart = true;
             return;
           case 'timer':
-            this.startTimerOnly();
+            this.zone.startTimerOnly();
             return;
           case 'area':
-            this.startFocusWithArea();
+            this.zone.startWithArea();
             return;
         }
         return;
       case 'start-timer-only':
         this.askingStart = false;
-        this.startTimerOnly();
+        this.zone.startTimerOnly();
         return;
       case 'start-with-area':
         this.askingStart = false;
-        this.startFocusWithArea();
+        this.zone.startWithArea();
         return;
       case 'start-cancel':
         return;
@@ -997,37 +868,15 @@ export class ImmersiveSession {
         return; // A drag, handled in selectStart.
       case 'exit-xr':
         // Leaving ends the session, so it takes two presses like a delete.
-        if (!this.confirmTwice('exit-xr')) return;
+        if (!this.confirm.confirm('exit-xr')) return;
         void this.xrSession?.end();
         return;
     }
   }
 
-  /** Runs just the clock: nothing in the room is dimmed. */
-  private startTimerOnly() {
-    if (this.host.getMode() === 'focus-drag') this.setMode('explore');
-    this.host.ui.startFocusTimer(false);
-  }
-
-  /** Starts focus with the room dimmed outside the focus area, setting the area first if needed. */
-  private startFocusWithArea() {
-    if (this.host.getMode() === 'focus-drag' && this.canConfirmZone()) {
-      // Starting focus while an area is on show uses that area.
-      this.startTimerAfterZone = true;
-      this.confirmZone();
-    } else if (this.host.focusZoneNeedsDefining()) {
-      // The timer starts once the area is confirmed; the hint says what to do.
-      this.setMode('focus-drag');
-      this.startTimerAfterZone = true;
-    } else {
-      this.host.ui.startFocusTimer(true);
-    }
-  }
-
   // ---------------------------------------------------------------------------
-  // Focus area
+  // Focus area drag (the area itself is XRFocusZoneEditor's)
   // ---------------------------------------------------------------------------
-
   private startFocusDrag(controller: xb.Controller, hit: SpatialHit) {
     const {origin, direction} = this.raycaster.ray;
     const ray = this.roomRay();
@@ -1059,605 +908,6 @@ export class ImmersiveSession {
       yaw: focusZoneYawFacing(ray.direction),
       moved: false,
     };
-  }
-
-  /** There is an area to confirm: one just drawn, or the one saved earlier. */
-  private canConfirmZone(): boolean {
-    return this.zoneDrawn || !this.host.focusZoneNeedsDefining();
-  }
-
-  /** Top centre of the area being set, in world space; null when there is none to confirm. */
-  private zoneBarAnchor(mode: AppMode): THREE.Vector3 | null {
-    if (mode !== 'focus-drag' || !this.canConfirmZone()) return null;
-    return this.host.worldRoot.localToWorld(
-      focusZoneTopCentre(this.host.getFocusZone(), _zonePoint),
-    );
-  }
-
-  private runZoneAction(action: XRZoneAction) {
-    if (action === 'zone-confirm') this.confirmZone();
-    else this.setMode('explore');
-  }
-
-  private confirmZone() {
-    if (!this.canConfirmZone()) return;
-    if (this.zoneDrawn) this.host.commitFocusZone();
-    const startTimer = this.startTimerAfterZone;
-    // Nothing left to put back when the mode is left below.
-    this.zoneDrawn = false;
-    this.zoneBeforeEdit = null;
-    this.setMode('explore');
-    lotusSound.playPinCreated();
-    if (startTimer && !this.host.ui.getIsTimerRunning()) {
-      this.host.ui.startFocusTimer(true);
-    } else {
-      this.ui.flashStatus('Focus area saved');
-    }
-  }
-
-  /** Leaving focus-area mode without confirming: show the saved area again. */
-  private discardZoneEdit() {
-    if (this.zoneDrawn && this.zoneBeforeEdit) {
-      this.host.previewFocusZone(this.zoneBeforeEdit);
-    }
-    this.zoneDrawn = false;
-    this.zoneBeforeEdit = null;
-    this.startTimerAfterZone = false;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Drawer: tasks, pins, settings
-  // ---------------------------------------------------------------------------
-
-  private runDrawerAction(action: XRDrawerAction) {
-    if (action !== 'task-delete') this.armed = null;
-    const [first, id, direction] = action.split(':');
-    // Safe: `action` is an XRDrawerAction, and DrawerActionName is by
-    // definition what those have before their first ':'.
-    const name = first as DrawerActionName;
-    switch (name) {
-      case 'move-drawer':
-        return; // A drag, handled in selectStart.
-      case 'page-prev':
-        this.ui.turnDrawerPage(-1);
-        return;
-      case 'page-next':
-        this.ui.turnDrawerPage(1);
-        return;
-      case 'pin':
-        this.openCard(id);
-        return;
-      case 'pin-sort':
-        this.pinSort = this.pinSort === 'proximity' ? 'date' : 'proximity';
-        return;
-      case 'setting':
-        this.changeSetting(id, direction === 'prev' ? -1 : 1);
-        return;
-      default:
-        // `name` is narrowed to what is left: a case removed above, or a new
-        // drawer action handled nowhere, fails to compile here or below.
-        this.runTaskAction(name, id);
-    }
-  }
-
-  private runTaskAction(name: TaskActionName, taskId: string | undefined) {
-    const tasks = this.host.getTasks();
-    const openTask = tasks.find((t) => t.id === this.openTaskId);
-    switch (name) {
-      // Task list
-      case 'task-toggle':
-        if (taskId) this.toggleTaskDone(taskId);
-        return;
-      case 'task-open':
-        this.openTaskId = taskId ?? null;
-        return;
-      case 'task-new':
-        this.taskForm = {
-          taskId: null,
-          title: '',
-          note: '',
-          dueLabel: '',
-          type: 'task',
-          timerMinutes: 25,
-        };
-        this.editTaskText('title');
-        return;
-      case 'task-filter':
-        this.taskFilter =
-          TASK_FILTERS[(TASK_FILTERS.indexOf(this.taskFilter) + 1) % TASK_FILTERS.length];
-        return;
-      case 'task-clear-done': {
-        const kept = tasks.filter((t) => !t.completed);
-        if (kept.length === tasks.length) {
-          this.ui.flashStatus('No done tasks to clear');
-          return;
-        }
-        this.host.commitTasks(kept);
-        this.ui.flashStatus('Done tasks cleared');
-        return;
-      }
-
-      // One open task
-      case 'task-back':
-        this.openTaskId = null;
-        return;
-      case 'task-done':
-        if (openTask) this.toggleTaskDone(openTask.id);
-        return;
-      case 'task-timer':
-        if (!openTask) return;
-        if (openTask.completed) {
-          this.ui.flashStatus('Mark the task as not done to run its timer');
-          return;
-        }
-        this.host.commitTasks(toggleTaskTimer(tasks, openTask.id));
-        return;
-      case 'task-pin':
-        if (!openTask) return;
-        this.setMode('pin-add');
-        this.pendingPinContent = pinContentFromTask(openTask);
-        return;
-      case 'task-edit':
-        if (!openTask) return;
-        this.taskForm = {
-          taskId: openTask.id,
-          title: openTask.title,
-          note: openTask.note,
-          dueLabel: openTask.dueLabel,
-          type: openTask.type,
-          timerMinutes: Math.max(1, Math.round((openTask.timerSeconds ?? 25 * 60) / 60)),
-        };
-        return;
-      case 'task-delete':
-        if (!openTask || !this.confirmTwice(`task:${openTask.id}`)) return;
-        this.host.commitTasks(tasks.filter((t) => t.id !== openTask.id));
-        this.openTaskId = null;
-        this.ui.flashStatus('Task deleted');
-        return;
-
-      // New / edit task form
-      case 'form-title':
-        this.editTaskText('title');
-        return;
-      case 'form-due':
-        this.editTaskText('dueLabel');
-        return;
-      case 'form-note':
-        this.editTaskText('note');
-        return;
-      case 'form-type':
-        if (this.taskForm) {
-          this.taskForm.type = this.taskForm.type === 'task' ? 'reminder' : 'task';
-        }
-        return;
-      case 'form-timer-down':
-      case 'form-timer-up':
-        if (this.taskForm) {
-          this.taskForm.timerMinutes = this.nextTimerPreset(
-            this.taskForm.timerMinutes,
-            name === 'form-timer-up' ? 1 : -1,
-          );
-        }
-        return;
-      case 'form-cancel':
-        this.taskForm = null;
-        return;
-      case 'form-save':
-        this.commitTextEdit();
-        this.saveTaskForm();
-        return;
-      default:
-        // Does not compile when a drawer action is handled nowhere.
-        name satisfies never;
-    }
-  }
-
-  private toggleTaskDone(taskId: string) {
-    const tasks = toggleTaskDone(this.host.getTasks(), taskId);
-    this.host.commitTasks(tasks);
-    lotusSound.playTaskTick(Boolean(tasks.find((t) => t.id === taskId)?.completed));
-  }
-
-  /** The timer preset one step from `minutes`, staying within the presets. */
-  private nextTimerPreset(minutes: number, direction: 1 | -1): number {
-    const presets = TASK_TIMER_PRESETS_MIN;
-    const next =
-      direction === 1
-        ? presets.find((m) => m > minutes)
-        : [...presets].reverse().find((m) => m < minutes);
-    return next ?? minutes;
-  }
-
-  private saveTaskForm() {
-    const form = this.taskForm;
-    if (!form) return;
-    if (!form.title.trim()) {
-      this.ui.flashStatus('Add a title first');
-      return;
-    }
-    const tasks = this.host.getTasks();
-    if (form.taskId === null) {
-      this.host.commitTasks([createTask(form), ...tasks]);
-      this.ui.flashStatus(form.type === 'reminder' ? 'Reminder added' : 'Task added');
-    } else {
-      const timerSeconds = form.timerMinutes * 60;
-      this.host.commitTasks(
-        tasks.map((t) =>
-          t.id === form.taskId
-            ? {
-                ...t,
-                title: form.title.trim(),
-                note: form.note.trim(),
-                dueLabel: form.dueLabel.trim() || (form.type === 'reminder' ? 'Reminder' : ''),
-                type: form.type,
-                // A new length restarts the timer; otherwise it keeps its place.
-                ...(timerSeconds === t.timerSeconds
-                  ? {}
-                  : {timerSeconds, remainingSeconds: timerSeconds, timerRunning: false}),
-              }
-            : t,
-        ),
-      );
-    }
-    this.taskForm = null;
-    lotusSound.playPinCreated();
-  }
-
-  private changeSetting(id: string, direction: 1 | -1) {
-    const def = findXRSetting(id);
-    if (!def) return;
-    const ui = this.host.ui;
-    const timerSetting = def.id === 'timer-mode' || def.id === 'focus-length';
-    if (timerSetting && ui.getIsTimerRunning()) {
-      // Changing the clock under a running timer would make it jump.
-      this.ui.flashStatus('Stop the focus timer to change this');
-      return;
-    }
-    const patch = def.step(ui.getSettings(), direction);
-    ui.applySettings(patch);
-    if (patch.defaultPinStyle) {
-      // As on the 2D screen, the pin shape applies to every pin.
-      const style = patch.defaultPinStyle;
-      this.host.commitPins(this.host.getPins().map((p) => ({...p, shapeStyle: style})));
-      const cardPin = this.findPin(this.ui.getCardPinId());
-      if (cardPin) this.ui.refreshCard(cardPin);
-    }
-  }
-
-  private drawerData(): XRDrawerData {
-    const data: XRDrawerData = {
-      tasks: [],
-      taskFilter: this.taskFilter,
-      hasCompletedTasks: false,
-      openTask: null,
-      taskForm: null,
-      pins: [],
-      pinSort: this.pinSort,
-      settings: [],
-    };
-    switch (this.ui.getDrawerTab()) {
-      case 'tasks':
-        this.fillTaskData(data);
-        break;
-      case 'pins':
-        this.fillPinData(data);
-        break;
-      case 'settings': {
-        const s = this.host.ui.getSettings();
-        data.settings = XR_SETTINGS.map((def) => ({
-          id: def.id,
-          name: def.name,
-          kind: def.kind,
-          hint: def.hint,
-          value: def.value(s),
-          swatch: def.swatch?.(s),
-        }));
-        break;
-      }
-    }
-    return data;
-  }
-
-  private fillTaskData(data: XRDrawerData) {
-    const tasks = this.host.getTasks();
-    if (this.taskForm) {
-      const {taskId, ...draft} = this.taskForm;
-      data.taskForm = {editing: taskId !== null, ...draft};
-      return;
-    }
-    const open = tasks.find((t) => t.id === this.openTaskId);
-    if (open) {
-      data.openTask = {
-        task: open,
-        clock: taskClockText(open),
-        deleteArmed: this.armed?.key === `task:${open.id}`,
-      };
-      return;
-    }
-    this.openTaskId = null;
-    data.hasCompletedTasks = tasks.some((t) => t.completed);
-    data.tasks = tasks
-      .filter(
-        (t) =>
-          this.taskFilter === 'all' ||
-          (this.taskFilter === 'completed') === t.completed,
-      )
-      // To-do first; the sort is stable, so each group keeps its order.
-      .sort((a, b) => Number(a.completed) - Number(b.completed))
-      .map((task) => ({task, clock: taskClockText(task)}));
-  }
-
-  private fillPinData(data: XRDrawerData) {
-    const {pinManager} = this.host;
-    for (const pin of this.host.getPins()) {
-      const distance = pinManager.getPinWorldPosition(pin.id, _pinPos)
-        ? _pinPos.distanceTo(_camPos)
-        : Infinity;
-      data.pins.push({pin, distance});
-    }
-    data.pins.sort(
-      this.pinSort === 'proximity'
-        ? (a, b) => a.distance - b.distance
-        : (a, b) => b.pin.createdAt - a.pin.createdAt,
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // Pin card
-  // ---------------------------------------------------------------------------
-
-  private runCardAction(action: XRCardAction) {
-    if (action !== 'delete') this.armed = null;
-    const pinId = this.ui.getCardPinId();
-    if (!pinId) return;
-    switch (action) {
-      case 'move-card':
-        return; // A drag, handled in selectStart.
-      case 'close':
-        this.closeCard();
-        return;
-      case 'delete':
-        if (!this.confirmTwice(`pin:${pinId}`)) return;
-        this.closeCard();
-        this.host.commitPins(this.host.getPins().filter((p) => p.id !== pinId));
-        this.ui.flashStatus('Pin deleted');
-        return;
-      case 'edit':
-        this.ui.setCardEditing(true);
-        return;
-      case 'edit-done':
-        // Text still on the keyboard counts, as if Done was pressed there.
-        this.commitTextEdit();
-        this.ui.setCardEditing(false);
-        return;
-      case 'field-title':
-        this.editPinText(pinId, 'title');
-        return;
-      case 'field-body':
-        this.editPinText(pinId, 'body');
-        return;
-      case 'field-place':
-        this.editPinText(pinId, 'surfaceLabel');
-        return;
-      case 'toggle-done':
-        this.updatePin(pinId, (pin) => ({...pin, completed: !pin.completed}));
-        return;
-      case 'color':
-        this.updatePin(pinId, (pin) => {
-          const colors = PIN_COLOR_OPTIONS.map((c) => c.value.toLowerCase());
-          const i = colors.indexOf((pin.color || '').toLowerCase());
-          return {...pin, color: PIN_COLOR_OPTIONS[(i + 1) % colors.length].value};
-        });
-        return;
-      case 'shape':
-        this.updatePin(pinId, (pin) => ({
-          ...pin,
-          shapeStyle:
-            (pin.shapeStyle ?? this.host.ui.getSettings().defaultPinStyle) === 'dot'
-              ? 'revolving'
-              : 'dot',
-        }));
-        return;
-    }
-  }
-
-  /** Applies `change` to one pin, commits, and redraws its card. */
-  private updatePin(pinId: string, change: (pin: SpatialPin) => SpatialPin) {
-    const pins = this.host.getPins();
-    const pin = pins.find((p) => p.id === pinId);
-    if (!pin) return;
-    const updated = change(pin);
-    this.host.commitPins(pins.map((p) => (p === pin ? updated : p)));
-    this.host.pinManager.triggerClickEffect(pinId);
-    this.ui.refreshCard(updated);
-  }
-
-  private openCard(pinId: string) {
-    const pin = this.findPin(pinId);
-    if (!pin) return;
-    this.closeEditor();
-    this.armed = null;
-    this.ui.openCard(pin);
-    this.host.pinManager.triggerClickEffect(pinId);
-    lotusSound.playPinOpen();
-  }
-
-  private closeCard() {
-    this.closeEditor();
-    this.ui.closeCard();
-  }
-
-  private findPin(pinId: string | null): SpatialPin | undefined {
-    return pinId ? this.host.getPins().find((p) => p.id === pinId) : undefined;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Text entry
-  // ---------------------------------------------------------------------------
-
-  /** Opens the keyboard for one of a pin's text fields. */
-  private editPinText(
-    pinId: string,
-    field: PinTextField,
-    request?: XRTextRequest,
-  ) {
-    const pin = this.findPin(pinId);
-    if (!pin) return;
-    this.requestText(
-      request ?? {...PIN_TEXT_FIELDS[field], initial: pin[field]},
-      (text) => {
-        // A pin always keeps a title: an emptied one stays as it was.
-        if (!text && field === 'title') return;
-        this.updatePin(pinId, (p) => (p[field] === text ? p : {...p, [field]: text}));
-      },
-      () => this.ui.getCardPinId() === pinId && Boolean(this.findPin(pinId)),
-    );
-  }
-
-  /** Opens the keyboard for one field of the task form. */
-  private editTaskText(field: TaskTextField) {
-    const form = this.taskForm;
-    if (!form) return;
-    this.requestText(
-      {...TASK_TEXT_FIELDS[field], initial: form[field]},
-      (text) => {
-        if (this.taskForm === form) form[field] = text;
-      },
-      () =>
-        this.taskForm === form &&
-        this.ui.getDrawerTab() === 'tasks' &&
-        !this.ui.isHudHidden(),
-    );
-  }
-
-  /**
-   * Opens the keyboard. `apply` receives the trimmed text when the user
-   * presses Done; Cancel drops the edit. The keyboard closes by itself once
-   * `alive` turns false. Moving on to another field keeps what was typed in
-   * the current one.
-   */
-  private requestText(
-    request: XRTextRequest,
-    apply: (text: string) => void,
-    alive: () => boolean,
-  ) {
-    this.commitTextEdit();
-    this.stopTextTools();
-    this.textEdit = {apply, alive};
-    this.ui.editor.open(request, {
-      voice: isSpeechSupported(),
-      systemKeyboard: this.systemKeyboard,
-    });
-  }
-
-  private closeEditor() {
-    this.stopTextTools();
-    this.textEdit = null;
-    this.ui.editor.close();
-  }
-
-  /** Saves what is on the keyboard to its field, as Done would, but keeps the keyboard open. */
-  private commitTextEdit() {
-    const edit = this.textEdit;
-    if (!edit || !this.ui.editor.isOpen() || !edit.alive()) return;
-    edit.apply(this.ui.editor.getText().trim());
-    this.ui.invalidateDrawer();
-  }
-
-  /** Stops dictation and the headset keyboard, whichever is running. */
-  private stopTextTools() {
-    this.pendingSystemKeyboard = false;
-    this.stopDictation?.();
-    this.stopDictation = null;
-    this.stopSystemKeyboard?.();
-    this.stopSystemKeyboard = null;
-  }
-
-  private runEditorAction(action: XRKeyAction) {
-    const editor = this.ui.editor;
-    if (editor.press(action)) {
-      // Typing dismisses an old message, but not "Listening…".
-      if (!this.stopDictation) editor.setStatus('');
-      return;
-    }
-    switch (action) {
-      case 'done': {
-        const apply = this.textEdit?.apply;
-        const text = editor.getText().trim();
-        this.closeEditor();
-        apply?.(text);
-        // A task form's field shows the new text at once.
-        this.ui.invalidateDrawer();
-        return;
-      }
-      case 'cancel':
-        this.closeEditor();
-        return;
-      case 'move':
-        return; // A drag, handled in selectStart.
-      case 'voice':
-        this.toggleDictation();
-        return;
-      case 'system-keyboard':
-        this.stopTextTools();
-        // Opens on release; see `pendingSystemKeyboard`.
-        this.pendingSystemKeyboard = true;
-        return;
-    }
-  }
-
-  private toggleDictation() {
-    const editor = this.ui.editor;
-    if (this.stopDictation) {
-      this.stopDictation();
-      this.stopDictation = null;
-      editor.setStatus('');
-      return;
-    }
-    this.stopTextTools();
-    const edit = this.textEdit;
-    const stop = dictateOnce(
-      (text) => {
-        if (this.textEdit === edit) editor.insert(text);
-      },
-      (failed) => {
-        if (this.stopDictation !== stop) return;
-        this.stopDictation = null;
-        editor.setStatus(failed ? 'Could not hear that. Check mic access and try again.' : '');
-      },
-    );
-    if (!stop) {
-      editor.setStatus('Voice input is not available in this browser.');
-      return;
-    }
-    this.stopDictation = stop;
-    editor.setStatus('Listening… speak now', true);
-  }
-
-  private openSystemKeyboard() {
-    if (!this.pendingSystemKeyboard) return;
-    this.pendingSystemKeyboard = false;
-    const editor = this.ui.editor;
-    const edit = this.textEdit;
-    if (!edit || !editor.isOpen()) return;
-    const stop = editWithSystemKeyboard(
-      editor.getText(),
-      (text) => {
-        if (this.textEdit === edit) editor.setText(text);
-      },
-      (text) => {
-        if (this.stopSystemKeyboard !== stop) return;
-        this.stopSystemKeyboard = null;
-        editor.setText(text);
-        editor.setStatus('');
-      },
-    );
-    if (!stop) {
-      editor.setStatus('The headset keyboard did not open. Use the keys below.');
-      return;
-    }
-    this.stopSystemKeyboard = stop;
-    editor.setStatus('Type on the headset keyboard, then close it and press Done');
   }
 }
 

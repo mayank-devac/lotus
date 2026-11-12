@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Spatial AR memory pins and distraction-free study focus zone — WebXR, browser-only, no backend.",
+  "description": "Spatial AR memory pins and distraction-free study focus zone \u2014 WebXR, browser-only, no backend.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -14,7 +14,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "d3": "^7.9.2",
@@ -26,6 +28,7 @@
     "@types/d3": "^7.4.3",
     "@types/three": "^0.187.0",
     "typescript": "^7.0.2",
-    "vite": "^8.3.8"
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
   }
 }

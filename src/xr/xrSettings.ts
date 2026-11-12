@@ -1,6 +1,6 @@
-import {PIN_COLOR_OPTIONS} from './LotusUI';
-import {getShieldStrength} from './storage';
-import {FocusStartMode, LotusSettings, ShieldStyle} from './types';
+import {PIN_COLOR_OPTIONS} from '../ui/dom';
+import {getShieldStrength} from '../storage';
+import {FocusStartMode, LotusSettings, ShieldStyle} from '../types';
 
 /**
  * The settings offered in the headset's Settings drawer. Each entry reads its

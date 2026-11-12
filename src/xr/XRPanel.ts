@@ -37,8 +37,10 @@ const _camPos = new THREE.Vector3();
 const _toPanel = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
 
-export interface PanelButton<Id extends string> {
-  id: Id;
+export interface PanelButton<Action> {
+  action: Action;
+  /** `action` as text: what hover and redraw keys compare. */
+  key: string;
   label: string;
   x: number;
   y: number;
@@ -137,13 +139,18 @@ export function wrapLines(
   return cut;
 }
 
-/** A flat panel whose face is a 2D canvas with rectangular button regions. */
-export class CanvasPanel<Id extends string> {
+/**
+ * A flat panel whose face is a 2D canvas with rectangular button regions.
+ * Each button carries an `Action`: a string id, or a typed object for buttons
+ * that carry data (see the drawer). `keyOf` turns an action into the text
+ * that hover and redraw keys compare; plain string ids are their own key.
+ */
+export class CanvasPanel<Action> {
   public readonly mesh: THREE.Mesh;
   public readonly ctx: CanvasRenderingContext2D;
-  public buttons: PanelButton<Id>[] = [];
-  /** Buttons a ray rests on right now: one per hand at most. */
-  private hovered: Id[] = [];
+  public buttons: PanelButton<Action>[] = [];
+  /** Keys of the buttons a ray rests on right now: one per hand at most. */
+  private hovered: string[] = [];
   private readonly canvas: HTMLCanvasElement;
   private texture: THREE.CanvasTexture;
   private geometry: THREE.PlaneGeometry;
@@ -154,6 +161,7 @@ export class CanvasPanel<Id extends string> {
     public readonly heightMeters: number,
     public readonly pxWidth: number,
     public readonly pxHeight: number,
+    private readonly keyOf: (action: Action) => string = String,
   ) {
     this.canvas = document.createElement('canvas');
     this.canvas.width = pxWidth;
@@ -197,7 +205,7 @@ export class CanvasPanel<Id extends string> {
    * shows while a ray rests on it.
    */
   public drawButton(
-    id: Id,
+    action: Action,
     label: string,
     content: ButtonContent,
     x: number,
@@ -207,7 +215,8 @@ export class CanvasPanel<Id extends string> {
     style: ButtonStyle = {},
   ) {
     const {ctx} = this;
-    const hovered = this.hovered.includes(id);
+    const key = this.keyOf(action);
+    const hovered = this.hovered.includes(key);
     roundRectPath(ctx, x, y, w, h, 22);
     if (style.armed) {
       ctx.fillStyle = ARMED_BG;
@@ -239,18 +248,19 @@ export class CanvasPanel<Id extends string> {
       ctx.fillText(fitText(ctx, content.text, w - 20), x + w / 2, y + h / 2 + 2);
     }
     ctx.restore();
-    this.buttons.push({id, label, x, y, w, h});
+    this.buttons.push({action, key, label, x, y, w, h});
   }
 
   /**
    * Sets which buttons the rays rest on. Returns true when that changed, so
    * the owner knows to redraw.
    */
-  public setHovered(ids: Id[]): boolean {
+  public setHovered(actions: readonly Action[]): boolean {
+    const keys = [...new Set(actions.map(this.keyOf))];
     const same =
-      ids.length === this.hovered.length &&
-      ids.every((id, i) => id === this.hovered[i]);
-    if (!same) this.hovered = ids;
+      keys.length === this.hovered.length &&
+      keys.every((key, i) => key === this.hovered[i]);
+    if (!same) this.hovered = keys;
     return !same;
   }
 
@@ -265,8 +275,8 @@ export class CanvasPanel<Id extends string> {
 
   /** Name of a button under a ray, if any. */
   public hoveredLabel(): string | null {
-    for (const id of this.hovered) {
-      const button = this.buttons.find((b) => b.id === id);
+    for (const key of this.hovered) {
+      const button = this.buttons.find((b) => b.key === key);
       if (button) return button.label;
     }
     return null;
@@ -300,7 +310,7 @@ export class CanvasPanel<Id extends string> {
    */
   public hit(
     raycaster: THREE.Raycaster,
-  ): {distance: number; buttonId: Id | null} | null {
+  ): {distance: number; action: Action | null} | null {
     if (!this.isShown()) return null;
     const mesh = this.mesh;
     mesh.updateWorldMatrix(true, false);
@@ -322,13 +332,13 @@ export class CanvasPanel<Id extends string> {
 
     const px = (_hitLocal.x / this.widthMeters + 0.5) * this.pxWidth;
     const py = (0.5 - _hitLocal.y / this.heightMeters) * this.pxHeight;
-    let best: PanelButton<Id> | null = null;
+    let best: PanelButton<Action> | null = null;
     let bestGap = Infinity;
     for (const b of this.buttons) {
       const dx = Math.max(b.x - px, 0, px - (b.x + b.w));
       const dy = Math.max(b.y - py, 0, py - (b.y + b.h));
       const gap = Math.hypot(dx, dy);
-      const pad = this.hovered.includes(b.id)
+      const pad = this.hovered.includes(b.key)
         ? BUTTON_HOVER_KEEP_PX
         : BUTTON_HIT_PAD_PX;
       if (gap <= pad && gap < bestGap) {
@@ -336,7 +346,7 @@ export class CanvasPanel<Id extends string> {
         bestGap = gap;
       }
     }
-    return {distance, buttonId: best?.id ?? null};
+    return {distance, action: best?.action ?? null};
   }
 
   public dispose() {
